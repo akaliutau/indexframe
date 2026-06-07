@@ -165,6 +165,7 @@ def start_cloud_run_job(*, submitted_url: str, user_email: str, submission_id: s
                         {"name": "SUBMITTED_URL", "value": submitted_url},
                         {"name": "USER_EMAIL", "value": user_email},
                         {"name": "SUBMISSION_ID", "value": submission_id},
+                        {"name": "OUT", "value": submission_id},
                     ]
                 }
             ]

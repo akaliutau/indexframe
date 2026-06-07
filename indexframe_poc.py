@@ -32,6 +32,7 @@ import ssl
 import random
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import textwrap
@@ -303,16 +304,36 @@ def ffmpeg_exe() -> str:
 
 
 def run_cmd(cmd: List[str], *, cwd: Optional[Path] = None, timeout: Optional[int] = None) -> str:
+    cwd_text = str(cwd) if cwd else None
     log("$ " + " ".join(shlex.quote(part) for part in cmd))
-    completed = subprocess.run(
-        cmd,
-        cwd=str(cwd) if cwd else None,
-        check=True,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        timeout=timeout,
-    )
+    if cwd_text:
+        log(f"cwd={cwd_text}")
+    try:
+        completed = subprocess.run(
+            cmd,
+            cwd=cwd_text,
+            check=True,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=timeout,
+        )
+    except subprocess.CalledProcessError as exc:
+        output = (exc.stdout or "").strip()
+        log(f"command failed with exit_code={exc.returncode}")
+        if output:
+            log("command output follows:\n" + output[-12000:])
+        raise
+    except subprocess.TimeoutExpired as exc:
+        output = ((exc.stdout or b"") if isinstance(exc.stdout, (bytes, bytearray)) else (exc.stdout or ""))
+        if isinstance(output, (bytes, bytearray)):
+            output = output.decode("utf-8", errors="replace")
+        log(f"command timed out after {timeout}s")
+        if output:
+            log("partial command output follows:\n" + str(output)[-12000:])
+        raise
+    if completed.stdout:
+        log("command output follows:\n" + completed.stdout[-12000:].rstrip())
     return completed.stdout
 
 
@@ -585,14 +606,143 @@ def find_latest_file(root: Path, exts: Iterable[str]) -> Optional[Path]:
     return max(candidates, key=lambda p: p.stat().st_mtime)
 
 
+def find_info_json(root: Path, debug_path: Optional[Path] = None) -> Optional[Path]:
+    debug_resolved = debug_path.resolve() if debug_path else None
+    candidates = []
+    for path in root.rglob("*.json"):
+        if not path.is_file():
+            continue
+        if path.name == "download_debug.json":
+            continue
+        if debug_resolved is not None:
+            try:
+                if path.resolve() == debug_resolved:
+                    continue
+            except Exception:
+                pass
+        candidates.append(path)
+    if not candidates:
+        return None
+    info_candidates = [path for path in candidates if path.name.endswith(".info.json")]
+    return max(info_candidates or candidates, key=lambda p: p.stat().st_mtime)
+
+
+def file_debug(path: Path) -> Dict[str, Any]:
+    data: Dict[str, Any] = {
+        "path": str(path),
+        "absolute": str(path.resolve()) if path.exists() else str(path.absolute()),
+        "exists": path.exists(),
+    }
+    try:
+        if path.exists():
+            stat = path.stat()
+            data.update({
+                "is_dir": path.is_dir(),
+                "is_file": path.is_file(),
+                "bytes": stat.st_size if path.is_file() else None,
+                "mtime_epoch": stat.st_mtime,
+            })
+    except Exception as exc:
+        data["stat_error"] = f"{exc.__class__.__name__}: {exc}"
+    return data
+
+
+def dir_listing_debug(root: Path, *, limit: int = 200) -> List[Dict[str, Any]]:
+    if not root.exists():
+        return []
+    items: List[Dict[str, Any]] = []
+    try:
+        paths = sorted(root.rglob("*"), key=lambda p: str(p))
+    except Exception as exc:
+        return [{"error": f"{exc.__class__.__name__}: {exc}"}]
+    for path in paths[:limit]:
+        try:
+            rel = path.relative_to(root).as_posix()
+        except Exception:
+            rel = str(path)
+        item = {
+            "relative_path": rel,
+            "is_dir": path.is_dir(),
+            "is_file": path.is_file(),
+        }
+        try:
+            stat = path.stat()
+            item.update({
+                "bytes": stat.st_size if path.is_file() else None,
+                "mtime_epoch": stat.st_mtime,
+            })
+        except Exception as exc:
+            item["stat_error"] = f"{exc.__class__.__name__}: {exc}"
+        items.append(item)
+    if len(paths) > limit:
+        items.append({"truncated": True, "shown": limit, "total": len(paths)})
+    return items
+
+
+def disk_usage_debug(path: Path) -> Dict[str, Any]:
+    try:
+        usage = shutil.disk_usage(str(path))
+        return {
+            "total_bytes": usage.total,
+            "used_bytes": usage.used,
+            "free_bytes": usage.free,
+        }
+    except Exception as exc:
+        return {"error": f"{exc.__class__.__name__}: {exc}"}
+
+
+def command_version_debug(executable: str) -> str:
+    resolved = shutil.which(executable) or ""
+    if not resolved:
+        return ""
+    try:
+        completed = subprocess.run(
+            [resolved, "--version"],
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=15,
+        )
+        return (completed.stdout or "").strip()[:500]
+    except Exception as exc:
+        return f"{exc.__class__.__name__}: {exc}"
+
+
+def write_download_debug(path: Path, data: Dict[str, Any]) -> None:
+    try:
+        dump_json(path, data)
+        log(f"download debug written to {path}")
+    except Exception as exc:
+        log(f"could not write download debug json: {exc}")
+
+
+def log_download_debug(label: str, debug: Dict[str, Any]) -> None:
+    try:
+        log(f"{label}: " + json.dumps(to_plain_json(debug), ensure_ascii=False, indent=2)[-12000:])
+    except NameError:
+        # to_plain_json is defined later in the file. Keep this helper usable before that point.
+        log(f"{label}: " + json.dumps(debug, ensure_ascii=False, indent=2)[-12000:])
+    except Exception as exc:
+        log(f"{label}: could not serialize debug data: {exc}")
+
+
 def download_or_resolve_video(url: str, out_dir: Path, video_path: Optional[Path], download_cmd: Optional[str]) -> Tuple[Path, Optional[Path], List[Path]]:
     if video_path:
+        video_path = video_path.expanduser().resolve()
         if not video_path.exists():
             raise FileNotFoundError(video_path)
         return video_path, None, []
 
+    # Cloud Run jobs often start with a relative OUT path like "1780860030-8573c99a".
+    # Use absolute paths in the downloader template because the command is executed with
+    # cwd=dl_dir. Otherwise yt-dlp can treat "178.../download/source.%(ext)s" as relative
+    # to dl_dir and try to write under a non-existent nested directory.
+    out_dir = out_dir.expanduser().resolve()
+    ensure_dir(out_dir)
     dl_dir = ensure_dir(out_dir / "download")
     target = dl_dir / "source.mp4"
+    debug_path = dl_dir / "download_debug.json"
     cmd_template = download_cmd or os.getenv("YT_DOWNLOAD_CMD", "")
 
     if not cmd_template:
@@ -606,14 +756,69 @@ def download_or_resolve_video(url: str, out_dir: Path, video_path: Optional[Path
         "out_base": str(dl_dir / "source"),
     }
     cmd_str = cmd_template.format(**values)
-    run_cmd(shlex.split(cmd_str), cwd=dl_dir, timeout=900)
+    cmd = shlex.split(cmd_str)
+    executable = cmd[0] if cmd else ""
+    debug: Dict[str, Any] = {
+        "status": "starting",
+        "time_epoch": time.time(),
+        "process_cwd": os.getcwd(),
+        "out_dir_arg": str(out_dir),
+        "out_dir": file_debug(out_dir),
+        "download_dir": file_debug(dl_dir),
+        "target": file_debug(target),
+        "download_debug_json": str(debug_path),
+        "cmd_template": cmd_template,
+        "cmd": cmd,
+        "cmd_str": cmd_str,
+        "cmd_executable": executable,
+        "cmd_executable_path": shutil.which(executable) if executable else None,
+        "cmd_executable_version": command_version_debug(executable) if executable else "",
+        "path_env": os.getenv("PATH", ""),
+        "python": sys.version,
+        "platform": sys.platform,
+        "disk_usage_out_dir": disk_usage_debug(out_dir),
+        "disk_usage_tmp": disk_usage_debug(Path("/tmp")),
+        "listing_before": dir_listing_debug(dl_dir),
+    }
+    log_download_debug("download setup", debug)
+    write_download_debug(debug_path, debug)
+
+    try:
+        run_cmd(cmd, cwd=dl_dir, timeout=900)
+    except Exception as exc:
+        debug.update({
+            "status": "download_command_failed",
+            "error_type": exc.__class__.__name__,
+            "error": str(exc),
+            "returncode": getattr(exc, "returncode", None),
+            "command_output_tail": str(getattr(exc, "stdout", "") or "")[-12000:],
+            "listing_after_failure": dir_listing_debug(dl_dir),
+            "target_after_failure": file_debug(target),
+            "disk_usage_out_dir_after_failure": disk_usage_debug(out_dir),
+            "disk_usage_tmp_after_failure": disk_usage_debug(Path("/tmp")),
+        })
+        log_download_debug("download failure debug", debug)
+        write_download_debug(debug_path, debug)
+        raise
 
     video = target if target.exists() else find_latest_file(dl_dir, VIDEO_EXTS)
-    if not video:
-        raise RuntimeError(f"Downloader finished but no video file found in {dl_dir}")
-
-    info_json = find_latest_file(dl_dir, {".json"})
+    info_json = find_info_json(dl_dir, debug_path)
     subtitle_files = [p for p in sorted(dl_dir.rglob("*")) if p.suffix.lower() in {".srt", ".vtt"}]
+    debug.update({
+        "status": "download_command_finished",
+        "listing_after_success": dir_listing_debug(dl_dir),
+        "target_after_success": file_debug(target),
+        "resolved_video": file_debug(video) if video else None,
+        "resolved_info_json": file_debug(info_json) if info_json else None,
+        "resolved_subtitle_files": [file_debug(path) for path in subtitle_files],
+        "disk_usage_out_dir_after_success": disk_usage_debug(out_dir),
+    })
+    log_download_debug("download result debug", debug)
+    write_download_debug(debug_path, debug)
+
+    if not video:
+        raise RuntimeError(f"Downloader finished but no video file found in {dl_dir}; see {debug_path}")
+
     return video, info_json, subtitle_files
 
 
@@ -1110,11 +1315,11 @@ def draw_text_block(
     tagfont = load_font(24)
 
     # Tag pill.
-    #tag = f"{angle}  ·  {score}"
-    #tb = draw.textbbox((0, 0), tag, font=tagfont)
-    #pill = (text_x, max(24, text_y - 58), text_x + tb[2] - tb[0] + 28, max(24, text_y - 58) + 38)
-    #draw.rounded_rectangle(pill, radius=18, fill=(255, 255, 255, 232))
-    #draw.text((pill[0] + 14, pill[1] + 6), tag, font=tagfont, fill=(10, 10, 12))
+    tag = f"{angle}  ·  {score}"
+    tb = draw.textbbox((0, 0), tag, font=tagfont)
+    pill = (text_x, max(24, text_y - 58), text_x + tb[2] - tb[0] + 28, max(24, text_y - 58) + 38)
+    draw.rounded_rectangle(pill, radius=18, fill=(255, 255, 255, 232))
+    draw.text((pill[0] + 14, pill[1] + 6), tag, font=tagfont, fill=(10, 10, 12))
 
     y = text_y
     for line in wrap_text(draw, headline, font, box_w, 3):
@@ -2380,7 +2585,7 @@ def run_pipeline(
 def build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Indexframe YouTube cover-variant PoC")
     p.add_argument("--url", default=os.getenv("SUBMITTED_URL", os.getenv("YOUTUBE_URL", "")), help="YouTube URL or video id. Defaults to SUBMITTED_URL or YOUTUBE_URL when set.")
-    p.add_argument("--out-dir", required=True, type=Path)
+    p.add_argument("--out-dir", default=os.getenv("OUT", ""))
     p.add_argument("--project", default=os.getenv("PROJECT_ID", ""))
     p.add_argument("--location", default=os.getenv("VERTEX_LOCATION", os.getenv("GOOGLE_CLOUD_LOCATION", "global")))
     p.add_argument("--youtube-api-key", default=os.getenv("YOUTUBE_API_KEY", ""))
@@ -2412,7 +2617,7 @@ def main() -> None:
         raise SystemExit("--url is required unless SUBMITTED_URL or YOUTUBE_URL is set")
     run_pipeline(
         url=args.url,
-        out_dir=args.out_dir,
+        out_dir=Path(args.out_dir),
         project=args.project or None,
         location=args.location,
         youtube_api_key=args.youtube_api_key or None,
