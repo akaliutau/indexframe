@@ -27,6 +27,8 @@ set -euo pipefail
 #   EMAIL_FROM=results@demo.yourdomain.com
 #   EMAIL_FROM_NAME=IndexFrame Results
 #   EMAIL_REPLY_TO=your-real-email@yourdomain.com
+#   YOUTUBE_COOKIES_SECRET=indexframe-youtube-cookies     # created by refresh_youtube_cookies.py
+#   YOUTUBE_COOKIES_MOUNT_PATH=/secrets/youtube-cookies.txt
 
 load_dotenv_file() {
   local file="${1:-.env}"
@@ -136,6 +138,11 @@ EMAIL_FROM_NAME="${EMAIL_FROM_NAME:-IndexFrame Results}"
 EMAIL_REPLY_TO="${EMAIL_REPLY_TO:-}"
 SMTP_TLS="${SMTP_TLS:-true}"
 
+# Demo-only yt-dlp YouTube cookie support. The cookie secret is created/updated by
+# refresh_youtube_cookies.py and mounted into the Cloud Run Job as a read-only file.
+YOUTUBE_COOKIES_SECRET="${YOUTUBE_COOKIES_SECRET:-${YT_DLP_COOKIES_SECRET:-indexframe-youtube-cookies}}"
+YOUTUBE_COOKIES_MOUNT_PATH="${YOUTUBE_COOKIES_MOUNT_PATH:-${YT_DLP_COOKIES_FILE:-/secrets/youtube-cookies.txt}}"
+
 printf '\n[1/7] Configuring gcloud project %s\n' "$PROJECT_ID"
 gcloud config set project "$PROJECT_ID" >/dev/null
 
@@ -180,7 +187,7 @@ gcloud storage buckets add-iam-policy-binding "gs://${BUCKET_NAME}" \
   --role="roles/storage.objectAdmin" \
   --project="$PROJECT_ID" >/dev/null
 
-printf '\n[5/7] Creating/updating SMTP2GO password secret if needed\n'
+printf '\n[5/7] Creating/updating SMTP2GO password secret and checking YouTube cookies secret\n'
 USE_SMTP_SECRET=false
 if create_or_update_smtp_secret "$SMTP_PASSWORD_SECRET"; then
   USE_SMTP_SECRET=true
@@ -188,6 +195,24 @@ if create_or_update_smtp_secret "$SMTP_PASSWORD_SECRET"; then
     --project "$PROJECT_ID" \
     --member="serviceAccount:${SERVICE_ACCOUNT}" \
     --role="roles/secretmanager.secretAccessor" >/dev/null
+fi
+
+USE_YOUTUBE_COOKIES_SECRET=false
+if secret_exists "$YOUTUBE_COOKIES_SECRET"; then
+  printf '\n[secret] Reusing YouTube cookies secret %s and mounting it at %s\n' "$YOUTUBE_COOKIES_SECRET" "$YOUTUBE_COOKIES_MOUNT_PATH"
+  USE_YOUTUBE_COOKIES_SECRET=true
+  gcloud secrets add-iam-policy-binding "$YOUTUBE_COOKIES_SECRET" \
+    --project "$PROJECT_ID" \
+    --member="serviceAccount:${SERVICE_ACCOUNT}" \
+    --role="roles/secretmanager.secretAccessor" >/dev/null
+else
+  cat <<EOF_YT_COOKIE_WARN
+
+[secret] YouTube cookies secret ${YOUTUBE_COOKIES_SECRET} does not exist.
+         Run refresh_youtube_cookies.py first if you want yt-dlp to use authenticated cookies:
+           python refresh_youtube_cookies.py --project ${PROJECT_ID} --secret-name ${YOUTUBE_COOKIES_SECRET}
+         The job will deploy without YT_DLP_COOKIES_FILE and may hit YouTube bot checks.
+EOF_YT_COOKIE_WARN
 fi
 
 printf '\n[6/7] Building image %s\n' "$IMAGE"
@@ -198,10 +223,20 @@ gcloud builds submit \
   .
 
 printf '\n[7/7] Deploying Cloud Run Job and service\n'
-JOB_ENV="SMTP_HOST=${SMTP_HOST},SMTP_PORT=${SMTP_PORT},SMTP_USERNAME=${SMTP_USERNAME},EMAIL_FROM=${EMAIL_FROM},EMAIL_FROM_NAME=${EMAIL_FROM_NAME},EMAIL_REPLY_TO=${EMAIL_REPLY_TO},SMTP_TLS=${SMTP_TLS},PROJECT_ID=${PROJECT_ID},OUTPUT_GCS_URI=${OUTPUT_GCS_URI}"
-JOB_SECRET_ARGS=()
+JOB_ENV="SMTP_HOST=${SMTP_HOST},SMTP_PORT=${SMTP_PORT},SMTP_USERNAME=${SMTP_USERNAME},EMAIL_FROM=${EMAIL_FROM},EMAIL_FROM_NAME=${EMAIL_FROM_NAME},EMAIL_REPLY_TO=${EMAIL_REPLY_TO},SMTP_TLS=${SMTP_TLS},PROJECT_ID=${PROJECT_ID},OUTPUT_GCS_URI=${OUTPUT_GCS_URI},GOOGLE_SERVICE_ACCOUNT_EMAIL=${SERVICE_ACCOUNT}"
+JOB_SECRET_VALUES=()
 if [[ "$USE_SMTP_SECRET" == "true" ]]; then
-  JOB_SECRET_ARGS=(--set-secrets "SMTP_PASSWORD=${SMTP_PASSWORD_SECRET}:latest")
+  JOB_SECRET_VALUES+=("SMTP_PASSWORD=${SMTP_PASSWORD_SECRET}:latest")
+fi
+if [[ "$USE_YOUTUBE_COOKIES_SECRET" == "true" ]]; then
+  JOB_ENV="${JOB_ENV},YT_DLP_COOKIES_FILE=${YOUTUBE_COOKIES_MOUNT_PATH}"
+  JOB_SECRET_VALUES+=("${YOUTUBE_COOKIES_MOUNT_PATH}=${YOUTUBE_COOKIES_SECRET}:latest")
+fi
+
+JOB_SECRET_ARGS=()
+if [[ "${#JOB_SECRET_VALUES[@]}" -gt 0 ]]; then
+  JOB_SECRET_CSV="$(IFS=,; printf '%s' "${JOB_SECRET_VALUES[*]}")"
+  JOB_SECRET_ARGS=(--set-secrets "$JOB_SECRET_CSV")
 fi
 
 gcloud run jobs deploy "$JOB_NAME" \
@@ -243,6 +278,12 @@ SMTP2GO:
   Password secret: ${SMTP_PASSWORD_SECRET}
   From: ${EMAIL_FROM_NAME} <${EMAIL_FROM}>
   Reply-To: ${EMAIL_REPLY_TO:-not set}
+
+YouTube cookies for yt-dlp:
+  Secret: ${YOUTUBE_COOKIES_SECRET}
+  Mounted in job: ${USE_YOUTUBE_COOKIES_SECRET}
+  Mount path: ${YOUTUBE_COOKIES_MOUNT_PATH}
+  Env var: YT_DLP_COOKIES_FILE=${YOUTUBE_COOKIES_MOUNT_PATH}
 
 Firebase checklist:
   1. If needed, run ./deploy_firebase.sh to create the Firebase Web App and update .env.

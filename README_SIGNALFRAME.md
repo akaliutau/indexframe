@@ -45,6 +45,36 @@ firebase login
 Deployment commands
 
 ```bash
+python refresh_youtube_cookies.py \
+  --project dev-indexframe \
+  --secret-name indexframe-youtube-cookies \
+  --update-cloud-run-job \
+  --job-name indexframe-poc \
+  --region us-central1
+```
+
+Build docker image and test cookie
+
+```bash
+sudo docker build -f Dockerfile.indexframe -t indexframe-cookie-poc .
+```
+
+Test YT pipeline in the docker:
+
+```bash
+sudo docker run --rm \
+  -v "$PWD/.indexframe-youtube-cookies.txt:/secrets/youtube-cookies.txt:ro" \
+  -e YT_DLP_COOKIES_FILE=/secrets/youtube-cookies.txt \
+  -e INDEXFRAME_VARIANTS=1 \
+  indexframe-cookie-poc \
+  python -u indexframe_poc.py \
+    --url 'https://www.youtube.com/watch?v=AHQIbAMTUkM' \
+    --out-dir /tmp/indexframe-cookie-smoke \
+    --skip-gemini
+```
+If the pipeline fails, rotate the cookies using `refresh_youtube_cookies` script
+
+```bash
 cp env.dev-linger.updated .env
 
 # Fill these in .env:

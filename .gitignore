@@ -224,3 +224,4 @@ runs/
 aggregated_dump.txt
 notes.txt
 scripts/*-debug.log
+.indexframe-youtube*

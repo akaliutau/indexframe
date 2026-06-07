@@ -42,6 +42,7 @@ import urllib.request
 from dataclasses import dataclass
 from email.message import EmailMessage
 from email.utils import formataddr
+import google.auth
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
@@ -303,37 +304,343 @@ def ffmpeg_exe() -> str:
     return os.getenv("FFMPEG", "ffmpeg")
 
 
+def is_sensitive_env_name(name: str) -> bool:
+    upper = name.upper()
+    if upper.endswith("_FILE") or upper.endswith("_PATH") or upper in {"PATH", "PYTHONPATH"}:
+        return False
+    return any(token in upper for token in ["PASSWORD", "TOKEN", "SECRET", "PRIVATE", "CREDENTIAL", "API_KEY"])
+
+
+def safe_env_value(name: str, value: Optional[str]) -> str:
+    if value is None:
+        return "<unset>"
+    if value == "":
+        return "<empty>"
+    if is_sensitive_env_name(name):
+        return f"<set:{len(value)} chars>"
+    return value
+
+
+def log_env_snapshot(names: Iterable[str]) -> None:
+    log("diagnostics: selected env vars")
+    for name in names:
+        log(f"  env {name}={safe_env_value(name, os.getenv(name))}")
+
+
+def path_debug(path_value: str) -> Dict[str, Any]:
+    path = Path(path_value)
+    data: Dict[str, Any] = {
+        "path": str(path),
+        "absolute": str(path if path.is_absolute() else Path.cwd() / path),
+        "exists": path.exists(),
+        "is_file": path.is_file(),
+        "is_dir": path.is_dir(),
+        "is_symlink": path.is_symlink(),
+        "readable": os.access(path, os.R_OK),
+    }
+    try:
+        resolved = path.resolve(strict=False)
+        data["resolved"] = str(resolved)
+    except Exception as exc:
+        data["resolve_error"] = f"{exc.__class__.__name__}: {exc}"
+    try:
+        st = path.stat()
+        data.update({
+            "mode": oct(st.st_mode & 0o777),
+            "uid": st.st_uid,
+            "gid": st.st_gid,
+            "bytes": st.st_size,
+        })
+    except Exception as exc:
+        data["stat_error"] = f"{exc.__class__.__name__}: {exc}"
+    if path.is_file():
+        try:
+            with path.open("rb") as fh:
+                sample = fh.read(8192)
+            data["first_8kb_bytes"] = len(sample)
+            data["first_8kb_newlines"] = sample.count(b"\n")
+        except Exception as exc:
+            data["read_sample_error"] = f"{exc.__class__.__name__}: {exc}"
+    return data
+
+
+def log_path_snapshot(label: str, path_value: Optional[str]) -> None:
+    if not path_value:
+        log(f"diagnostics: {label}: <unset>")
+        return
+    log(f"diagnostics: {label}: " + json.dumps(path_debug(path_value), sort_keys=True))
+
+
+def log_dir_listing(label: str, path_value: str, *, max_items: int = 20) -> None:
+    path = Path(path_value)
+    if not path.exists() or not path.is_dir():
+        log(f"diagnostics: {label}: not a directory: {path_value}")
+        return
+    items: List[Dict[str, Any]] = []
+    try:
+        for child in sorted(path.iterdir(), key=lambda p: p.name)[:max_items]:
+            item = path_debug(str(child))
+            # Keep the directory listing compact in Cloud Run logs.
+            item = {k: item.get(k) for k in ["path", "exists", "is_file", "is_dir", "is_symlink", "mode", "bytes", "readable"]}
+            items.append(item)
+    except Exception as exc:
+        log(f"diagnostics: {label}: list failed: {exc.__class__.__name__}: {exc}")
+        return
+    log(f"diagnostics: {label}: " + json.dumps(items, sort_keys=True))
+
+
+def log_executable_snapshot(name: str) -> None:
+    resolved = shutil.which(name)
+    log(f"diagnostics: executable {name}: which={resolved or '<not found>'}")
+    if not resolved:
+        return
+    try:
+        completed = subprocess.run(
+            [resolved, "--version"],
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=20,
+        )
+        log(f"diagnostics: executable {name}: version rc={completed.returncode} output={completed.stdout.strip()[:1000]!r}")
+    except Exception as exc:
+        log(f"diagnostics: executable {name}: version failed: {exc.__class__.__name__}: {exc}")
+
+
+def _same_path(left: Path, right: Path) -> bool:
+    try:
+        return left.resolve(strict=False) == right.resolve(strict=False)
+    except Exception:
+        return str(left) == str(right)
+
+
+def _default_secret_cookie_file() -> Optional[Path]:
+    candidate = Path("/secrets/youtube-cookies.txt")
+    return candidate if candidate.is_file() else None
+
+
+def prepare_writable_yt_dlp_cookies_file(dl_dir: Path) -> Optional[Path]:
+    """Copy mounted cookies to an absolute writable download workdir.
+
+    Cloud Run secret volumes are read-only. yt-dlp can read a Netscape cookie file from a
+    secret mount, but it may also try to persist updated cookies back to the same path. Passing
+    the read-only mount directly can therefore fail with Errno 30. This function keeps the
+    mounted secret immutable and gives yt-dlp a per-run copy it can update safely.
+    """
+    source_value = (os.getenv("YT_DLP_COOKIES_FILE_ORIGINAL") or os.getenv("YT_DLP_COOKIES_FILE") or "").strip()
+    if not source_value:
+        default_secret = _default_secret_cookie_file()
+        if default_secret is not None:
+            source_value = str(default_secret)
+            os.environ["YT_DLP_COOKIES_FILE"] = source_value
+            log(f"diagnostics: inferred YT_DLP_COOKIES_FILE={source_value}")
+
+    if not source_value:
+        return None
+
+    source = Path(source_value)
+    log_path_snapshot("YT_DLP_COOKIES_FILE source", str(source))
+
+    if not source.exists():
+        raise FileNotFoundError(f"YT_DLP_COOKIES_FILE does not exist: {source}")
+    if not source.is_file():
+        raise FileNotFoundError(f"YT_DLP_COOKIES_FILE is not a regular file: {source}")
+    if not os.access(source, os.R_OK):
+        raise PermissionError(f"YT_DLP_COOKIES_FILE is not readable: {source}")
+
+    # Use absolute paths because the downloader is executed with cwd=dl_dir.
+    # A relative cookie path like "178.../download/cookies/youtube-cookies.txt"
+    # would otherwise be resolved relative to dl_dir and fail with FileNotFoundError.
+    dl_dir = ensure_dir(dl_dir).resolve(strict=False)
+    cookie_dir = ensure_dir(dl_dir / "cookies").resolve(strict=False)
+    writable_copy = (cookie_dir / "youtube-cookies.txt").resolve(strict=False)
+
+    if not _same_path(source, writable_copy):
+        tmp = writable_copy.with_name(writable_copy.name + ".tmp")
+        shutil.copyfile(source, tmp)
+        os.chmod(tmp, 0o600)
+        tmp.replace(writable_copy)
+        log(f"diagnostics: copied yt-dlp cookies to writable workdir path {writable_copy}")
+    else:
+        log(f"diagnostics: yt-dlp cookies already point at writable workdir path {writable_copy}")
+
+    os.environ.setdefault("YT_DLP_COOKIES_FILE_ORIGINAL", str(source))
+    os.environ["YT_DLP_COOKIES_FILE"] = str(writable_copy)
+    log_path_snapshot("YT_DLP_COOKIES_FILE writable", str(writable_copy))
+    return writable_copy
+
+
+def _looks_like_cookie_file_path(value: str) -> bool:
+    if not value:
+        return False
+    lowered = value.lower()
+    return (
+        value.startswith("/")
+        or value.startswith(".")
+        or "/" in value
+        or "\\" in value
+        or lowered.endswith((".txt", ".cookies", ".cookie", ".netscape"))
+        or "$yt_dlp_cookies_file" in lowered
+        or "${yt_dlp_cookies_file}" in lowered
+    )
+
+
+def _is_yt_dlp_command(cmd: List[str]) -> bool:
+    if not cmd:
+        return False
+    executable = Path(cmd[0]).name.lower()
+    if executable in {"yt-dlp", "yt-dlp.exe"} or "yt-dlp" in executable:
+        return True
+    return len(cmd) >= 3 and Path(cmd[0]).name.lower().startswith("python") and cmd[1:3] == ["-m", "yt_dlp"]
+
+
+def _command_has_cookie_file_arg(cmd: List[str]) -> bool:
+    return any(
+        part in {"--cookies", "--cookies-from-browser"}
+        or part.startswith("--cookies=")
+        or part.startswith("--cookies-from-browser=")
+        for part in cmd
+    )
+
+
+def apply_writable_cookie_file_to_command(cmd: List[str], cookies_file: Optional[Path]) -> List[str]:
+    """Force yt-dlp cookie-file args to use the writable copy.
+
+    Also repairs the common mistake `--cookies-from-browser /path/to/cookies.txt` by converting
+    it to `--cookies /writable/copy`, while leaving real browser names such as chrome/firefox
+    untouched.
+    """
+    if not cookies_file:
+        return cmd
+
+    cookies = str(cookies_file.resolve(strict=False))
+    rewritten: List[str] = []
+    changed = False
+    i = 0
+
+    while i < len(cmd):
+        part = cmd[i]
+
+        if part == "--cookies":
+            rewritten.extend(["--cookies", cookies])
+            i += 2 if i + 1 < len(cmd) else 1
+            changed = True
+            continue
+
+        if part.startswith("--cookies="):
+            rewritten.append(f"--cookies={cookies}")
+            i += 1
+            changed = True
+            continue
+
+        if part == "--cookies-from-browser":
+            browser_or_path = cmd[i + 1] if i + 1 < len(cmd) else ""
+            if _looks_like_cookie_file_path(browser_or_path):
+                rewritten.extend(["--cookies", cookies])
+                i += 2 if i + 1 < len(cmd) else 1
+                changed = True
+                log("diagnostics: replaced --cookies-from-browser <cookie-file-path> with --cookies <writable-copy>")
+                continue
+
+            rewritten.append(part)
+            if i + 1 < len(cmd):
+                rewritten.append(browser_or_path)
+                i += 2
+            else:
+                i += 1
+            continue
+
+        if part.startswith("--cookies-from-browser="):
+            browser_or_path = part.split("=", 1)[1]
+            if _looks_like_cookie_file_path(browser_or_path):
+                rewritten.append(f"--cookies={cookies}")
+                changed = True
+                log("diagnostics: replaced --cookies-from-browser=<cookie-file-path> with --cookies=<writable-copy>")
+            else:
+                rewritten.append(part)
+            i += 1
+            continue
+
+        rewritten.append(part)
+        i += 1
+
+    if not _command_has_cookie_file_arg(rewritten) and _is_yt_dlp_command(rewritten):
+        rewritten = [rewritten[0], "--cookies", cookies, *rewritten[1:]]
+        changed = True
+        log("diagnostics: added --cookies <writable-copy> to yt-dlp command")
+
+    if changed:
+        log("diagnostics: downloader argv was rewritten to use writable cookie file")
+    elif cookies_file and not _command_has_cookie_file_arg(rewritten):
+        log("diagnostics: WARNING writable cookies exist but command is not recognized as yt-dlp; not injecting --cookies automatically.")
+
+    return rewritten
+
+
+def log_downloader_diagnostics(*, dl_dir: Path, cmd: List[str], cmd_template: str) -> None:
+    log("diagnostics: downloader preflight start")
+    log_env_snapshot([
+        "SUBMITTED_URL",
+        "YOUTUBE_URL",
+        "OUT",
+        "PROJECT_ID",
+        "OUTPUT_GCS_URI",
+        "YT_DLP_COOKIES_FILE_ORIGINAL",
+        "YT_DLP_COOKIES_FILE",
+        "YT_DOWNLOAD_CMD",
+        "PATH",
+        "HOME",
+        "PWD",
+    ])
+    log(f"diagnostics: cwd={Path.cwd()} dl_dir={dl_dir} dl_dir_exists={dl_dir.exists()} dl_dir_writable={os.access(dl_dir, os.W_OK)}")
+    log_path_snapshot("YT_DLP_COOKIES_FILE_ORIGINAL", os.getenv("YT_DLP_COOKIES_FILE_ORIGINAL"))
+    log_path_snapshot("YT_DLP_COOKIES_FILE", os.getenv("YT_DLP_COOKIES_FILE"))
+    cookies_file = os.getenv("YT_DLP_COOKIES_FILE", "").strip()
+    if cookies_file:
+        log_dir_listing("YT_DLP_COOKIES_FILE parent", str(Path(cookies_file).parent))
+    if Path("/secrets").exists():
+        log_dir_listing("/secrets", "/secrets")
+    else:
+        log("diagnostics: /secrets does not exist")
+    if cmd:
+        log_executable_snapshot(cmd[0])
+    log(f"diagnostics: downloader template={cmd_template}")
+    log("diagnostics: downloader argv=" + json.dumps(cmd))
+    if cookies_file and not _command_has_cookie_file_arg(cmd):
+        log("diagnostics: WARNING YT_DLP_COOKIES_FILE is set but the downloader command does not include --cookies/--cookies-from-browser; yt-dlp will not use that env var automatically.")
+    log("diagnostics: downloader preflight end")
+
+
 def run_cmd(cmd: List[str], *, cwd: Optional[Path] = None, timeout: Optional[int] = None) -> str:
-    cwd_text = str(cwd) if cwd else None
     log("$ " + " ".join(shlex.quote(part) for part in cmd))
-    if cwd_text:
-        log(f"cwd={cwd_text}")
     try:
         completed = subprocess.run(
             cmd,
-            cwd=cwd_text,
-            check=True,
+            cwd=str(cwd) if cwd else None,
+            check=False,
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             timeout=timeout,
         )
-    except subprocess.CalledProcessError as exc:
-        output = (exc.stdout or "").strip()
-        log(f"command failed with exit_code={exc.returncode}")
-        if output:
-            log("command output follows:\n" + output[-12000:])
-        raise
     except subprocess.TimeoutExpired as exc:
-        output = ((exc.stdout or b"") if isinstance(exc.stdout, (bytes, bytearray)) else (exc.stdout or ""))
-        if isinstance(output, (bytes, bytearray)):
+        output = exc.stdout or ""
+        if isinstance(output, bytes):
             output = output.decode("utf-8", errors="replace")
-        log(f"command timed out after {timeout}s")
+        log(f"command timed out after {timeout}s: {' '.join(shlex.quote(part) for part in cmd)}")
         if output:
-            log("partial command output follows:\n" + str(output)[-12000:])
+            log("command output before timeout:\n" + output[-12000:])
         raise
+    except Exception as exc:
+        log(f"command failed before completion: {exc.__class__.__name__}: {exc}")
+        raise
+
+    log(f"command exit code: {completed.returncode}")
     if completed.stdout:
-        log("command output follows:\n" + completed.stdout[-12000:].rstrip())
+        log("command output:\n" + completed.stdout[-12000:])
+    if completed.returncode != 0:
+        raise subprocess.CalledProcessError(completed.returncode, cmd, output=completed.stdout)
     return completed.stdout
 
 
@@ -606,219 +913,51 @@ def find_latest_file(root: Path, exts: Iterable[str]) -> Optional[Path]:
     return max(candidates, key=lambda p: p.stat().st_mtime)
 
 
-def find_info_json(root: Path, debug_path: Optional[Path] = None) -> Optional[Path]:
-    debug_resolved = debug_path.resolve() if debug_path else None
-    candidates = []
-    for path in root.rglob("*.json"):
-        if not path.is_file():
-            continue
-        if path.name == "download_debug.json":
-            continue
-        if debug_resolved is not None:
-            try:
-                if path.resolve() == debug_resolved:
-                    continue
-            except Exception:
-                pass
-        candidates.append(path)
-    if not candidates:
-        return None
-    info_candidates = [path for path in candidates if path.name.endswith(".info.json")]
-    return max(info_candidates or candidates, key=lambda p: p.stat().st_mtime)
-
-
-def file_debug(path: Path) -> Dict[str, Any]:
-    data: Dict[str, Any] = {
-        "path": str(path),
-        "absolute": str(path.resolve()) if path.exists() else str(path.absolute()),
-        "exists": path.exists(),
-    }
-    try:
-        if path.exists():
-            stat = path.stat()
-            data.update({
-                "is_dir": path.is_dir(),
-                "is_file": path.is_file(),
-                "bytes": stat.st_size if path.is_file() else None,
-                "mtime_epoch": stat.st_mtime,
-            })
-    except Exception as exc:
-        data["stat_error"] = f"{exc.__class__.__name__}: {exc}"
-    return data
-
-
-def dir_listing_debug(root: Path, *, limit: int = 200) -> List[Dict[str, Any]]:
-    if not root.exists():
-        return []
-    items: List[Dict[str, Any]] = []
-    try:
-        paths = sorted(root.rglob("*"), key=lambda p: str(p))
-    except Exception as exc:
-        return [{"error": f"{exc.__class__.__name__}: {exc}"}]
-    for path in paths[:limit]:
-        try:
-            rel = path.relative_to(root).as_posix()
-        except Exception:
-            rel = str(path)
-        item = {
-            "relative_path": rel,
-            "is_dir": path.is_dir(),
-            "is_file": path.is_file(),
-        }
-        try:
-            stat = path.stat()
-            item.update({
-                "bytes": stat.st_size if path.is_file() else None,
-                "mtime_epoch": stat.st_mtime,
-            })
-        except Exception as exc:
-            item["stat_error"] = f"{exc.__class__.__name__}: {exc}"
-        items.append(item)
-    if len(paths) > limit:
-        items.append({"truncated": True, "shown": limit, "total": len(paths)})
-    return items
-
-
-def disk_usage_debug(path: Path) -> Dict[str, Any]:
-    try:
-        usage = shutil.disk_usage(str(path))
-        return {
-            "total_bytes": usage.total,
-            "used_bytes": usage.used,
-            "free_bytes": usage.free,
-        }
-    except Exception as exc:
-        return {"error": f"{exc.__class__.__name__}: {exc}"}
-
-
-def command_version_debug(executable: str) -> str:
-    resolved = shutil.which(executable) or ""
-    if not resolved:
-        return ""
-    try:
-        completed = subprocess.run(
-            [resolved, "--version"],
-            check=False,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            timeout=15,
-        )
-        return (completed.stdout or "").strip()[:500]
-    except Exception as exc:
-        return f"{exc.__class__.__name__}: {exc}"
-
-
-def write_download_debug(path: Path, data: Dict[str, Any]) -> None:
-    try:
-        dump_json(path, data)
-        log(f"download debug written to {path}")
-    except Exception as exc:
-        log(f"could not write download debug json: {exc}")
-
-
-def log_download_debug(label: str, debug: Dict[str, Any]) -> None:
-    try:
-        log(f"{label}: " + json.dumps(to_plain_json(debug), ensure_ascii=False, indent=2)[-12000:])
-    except NameError:
-        # to_plain_json is defined later in the file. Keep this helper usable before that point.
-        log(f"{label}: " + json.dumps(debug, ensure_ascii=False, indent=2)[-12000:])
-    except Exception as exc:
-        log(f"{label}: could not serialize debug data: {exc}")
-
-
 def download_or_resolve_video(url: str, out_dir: Path, video_path: Optional[Path], download_cmd: Optional[str]) -> Tuple[Path, Optional[Path], List[Path]]:
     if video_path:
-        video_path = video_path.expanduser().resolve()
         if not video_path.exists():
             raise FileNotFoundError(video_path)
         return video_path, None, []
 
-    # Cloud Run jobs often start with a relative OUT path like "1780860030-8573c99a".
-    # Use absolute paths in the downloader template because the command is executed with
-    # cwd=dl_dir. Otherwise yt-dlp can treat "178.../download/source.%(ext)s" as relative
-    # to dl_dir and try to write under a non-existent nested directory.
-    out_dir = out_dir.expanduser().resolve()
-    ensure_dir(out_dir)
-    dl_dir = ensure_dir(out_dir / "download")
-    target = dl_dir / "source.mp4"
-    debug_path = dl_dir / "download_debug.json"
+    # Keep downloader paths absolute. run_cmd executes yt-dlp with cwd=dl_dir, so any
+    # relative path inserted into -o/--cookies can be interpreted relative to dl_dir.
+    dl_dir = ensure_dir(out_dir / "download").resolve(strict=False)
+    target = (dl_dir / "source.mp4").resolve(strict=False)
+    writable_cookies_file = prepare_writable_yt_dlp_cookies_file(dl_dir)
+
     cmd_template = download_cmd or os.getenv("YT_DOWNLOAD_CMD", "")
 
     if not cmd_template:
-        # Fallback for local dev. The hackathon repo can replace this with the existing downloader CLI.
-        cmd_template = "yt-dlp -f bv*+ba/best --merge-output-format mp4 --write-info-json --write-auto-subs --sub-lang en --convert-subs srt -o {out_base}.%(ext)s {url}"
+        # Fallback for local dev. If cookies are configured, pass the writable copy rather
+        # than the read-only Cloud Run secret mount.
+        cookie_args = "--cookies {cookies} " if writable_cookies_file else ""
+        cmd_template = (
+            f"yt-dlp {cookie_args}-f bv*+ba/best --merge-output-format mp4 --remote-components ejs:npm "
+            "--write-info-json --write-auto-subs --sub-lang en --convert-subs srt "
+            "-o {out_base}.%(ext)s {url}"
+        )
 
     values = {
         "url": url,
         "out": str(target),
         "out_dir": str(dl_dir),
         "out_base": str(dl_dir / "source"),
+        "cookies": str(writable_cookies_file or ""),
+        "cookies_file": str(writable_cookies_file or ""),
     }
     cmd_str = cmd_template.format(**values)
     cmd = shlex.split(cmd_str)
-    executable = cmd[0] if cmd else ""
-    debug: Dict[str, Any] = {
-        "status": "starting",
-        "time_epoch": time.time(),
-        "process_cwd": os.getcwd(),
-        "out_dir_arg": str(out_dir),
-        "out_dir": file_debug(out_dir),
-        "download_dir": file_debug(dl_dir),
-        "target": file_debug(target),
-        "download_debug_json": str(debug_path),
-        "cmd_template": cmd_template,
-        "cmd": cmd,
-        "cmd_str": cmd_str,
-        "cmd_executable": executable,
-        "cmd_executable_path": shutil.which(executable) if executable else None,
-        "cmd_executable_version": command_version_debug(executable) if executable else "",
-        "path_env": os.getenv("PATH", ""),
-        "python": sys.version,
-        "platform": sys.platform,
-        "disk_usage_out_dir": disk_usage_debug(out_dir),
-        "disk_usage_tmp": disk_usage_debug(Path("/tmp")),
-        "listing_before": dir_listing_debug(dl_dir),
-    }
-    log_download_debug("download setup", debug)
-    write_download_debug(debug_path, debug)
+    cmd = apply_writable_cookie_file_to_command(cmd, writable_cookies_file)
+    log_downloader_diagnostics(dl_dir=dl_dir, cmd=cmd, cmd_template=cmd_template)
+    run_cmd(cmd, cwd=dl_dir, timeout=900)
 
-    try:
-        run_cmd(cmd, cwd=dl_dir, timeout=900)
-    except Exception as exc:
-        debug.update({
-            "status": "download_command_failed",
-            "error_type": exc.__class__.__name__,
-            "error": str(exc),
-            "returncode": getattr(exc, "returncode", None),
-            "command_output_tail": str(getattr(exc, "stdout", "") or "")[-12000:],
-            "listing_after_failure": dir_listing_debug(dl_dir),
-            "target_after_failure": file_debug(target),
-            "disk_usage_out_dir_after_failure": disk_usage_debug(out_dir),
-            "disk_usage_tmp_after_failure": disk_usage_debug(Path("/tmp")),
-        })
-        log_download_debug("download failure debug", debug)
-        write_download_debug(debug_path, debug)
-        raise
-
+    log_dir_listing("download directory after downloader", str(dl_dir))
     video = target if target.exists() else find_latest_file(dl_dir, VIDEO_EXTS)
-    info_json = find_info_json(dl_dir, debug_path)
-    subtitle_files = [p for p in sorted(dl_dir.rglob("*")) if p.suffix.lower() in {".srt", ".vtt"}]
-    debug.update({
-        "status": "download_command_finished",
-        "listing_after_success": dir_listing_debug(dl_dir),
-        "target_after_success": file_debug(target),
-        "resolved_video": file_debug(video) if video else None,
-        "resolved_info_json": file_debug(info_json) if info_json else None,
-        "resolved_subtitle_files": [file_debug(path) for path in subtitle_files],
-        "disk_usage_out_dir_after_success": disk_usage_debug(out_dir),
-    })
-    log_download_debug("download result debug", debug)
-    write_download_debug(debug_path, debug)
-
     if not video:
-        raise RuntimeError(f"Downloader finished but no video file found in {dl_dir}; see {debug_path}")
+        raise RuntimeError(f"Downloader finished but no video file found in {dl_dir}")
 
+    info_json = find_latest_file(dl_dir, {".json"})
+    subtitle_files = [p for p in sorted(dl_dir.rglob("*")) if p.suffix.lower() in {".srt", ".vtt"}]
     return video, info_json, subtitle_files
 
 
@@ -2252,11 +2391,16 @@ def generate_signed_get_url(blob: Any, client: Any, *, expiration_sec: int = 60 
         return blob.generate_signed_url(**kwargs)
     except Exception as first_exc:
         credentials = getattr(client, "_credentials", None) or getattr(client, "credentials", None)
-        service_account_email = (
+        credential_email = (
             getattr(credentials, "service_account_email", None)
             or getattr(credentials, "signer_email", None)
-            or os.getenv("GOOGLE_SERVICE_ACCOUNT_EMAIL", "")
+            or ""
         )
+        service_account_email = (
+            os.getenv("GOOGLE_SERVICE_ACCOUNT_EMAIL", "").strip()
+            or (credential_email if credential_email != "default" else "")
+        )
+
         try:
             from google.auth.transport.requests import Request  # type: ignore
 
@@ -2291,7 +2435,13 @@ def upload_dir_to_gcs(
     bucket_name, prefix = split_gs_uri(output_uri)
     upload_prefix = join_gcs_prefix(prefix, clean_gcs_prefix_part(local_dir.as_posix()))
     upload_root_uri = f"gs://{bucket_name}/{upload_prefix}" if upload_prefix else f"gs://{bucket_name}"
-    client = storage.Client(project=project or None)
+    credentials, adc_project = google.auth.default(
+        scopes = ["https://www.googleapis.com/auth/cloud-platform"]
+    )
+    client = storage.Client(
+        project = project or adc_project or None,
+        credentials = credentials,
+    )
     bucket = client.bucket(bucket_name)
     uploaded: List[str] = []
     uploaded_items: List[Dict[str, str]] = []
