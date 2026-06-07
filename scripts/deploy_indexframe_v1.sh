@@ -115,6 +115,9 @@ FIREBASE_APP_ID="${FIREBASE_APP_ID:-}"
 DISABLE_AUTH="${DISABLE_AUTH:-false}"
 DEMO_EMAIL="${DEMO_EMAIL:-}"
 
+BUCKET_NAME="${BUCKET_NAME:-indexframe-data}"
+OUTPUT_GCS_URI="${OUTPUT_GCS_URI:-gs://${BUCKET_NAME}}"
+
 if [[ -z "$FIREBASE_API_KEY" || -z "$FIREBASE_APP_ID" ]]; then
   cat <<EOF_FIREBASE_WARN
 
@@ -137,11 +140,11 @@ printf '\n[1/7] Configuring gcloud project %s\n' "$PROJECT_ID"
 gcloud config set project "$PROJECT_ID" >/dev/null
 
 printf '\n[2/7] Enabling required APIs\n'
-gcloud services enable aiplatform.googleapis.com compute.googleapis.com logging.googleapis.com cloudquotas.googleapis.com \
-       cloudresourcemanager.googleapis.com iam.googleapis.com cloudbuild.googleapis.com \
-       artifactregistry.googleapis.com secretmanager.googleapis.com \
-       run.googleapis.com \
-  --project "$PROJECT_ID"
+ gcloud services enable aiplatform.googleapis.com compute.googleapis.com logging.googleapis.com cloudquotas.googleapis.com \
+        cloudresourcemanager.googleapis.com iam.googleapis.com cloudbuild.googleapis.com \
+        artifactregistry.googleapis.com secretmanager.googleapis.com \
+        run.googleapis.com iamcredentials.googleapis.com storage.googleapis.com \
+   --project "$PROJECT_ID"
 
 printf '\n[3/7] Ensuring Artifact Registry repo exists\n'
 gcloud artifacts repositories create "$REPOSITORY" \
@@ -163,6 +166,20 @@ gcloud projects add-iam-policy-binding "$PROJECT_ID" \
   --role="roles/run.developer" \
   --condition=None >/dev/null
 
+gcloud iam service-accounts add-iam-policy-binding "$SERVICE_ACCOUNT" \
+  --member="serviceAccount:${SERVICE_ACCOUNT}" \
+  --role="roles/iam.serviceAccountTokenCreator" \
+  --project "$PROJECT_ID" >/dev/null
+
+gcloud storage buckets create "gs://${BUCKET_NAME}" \
+  --location="$REGION" \
+  --project="$PROJECT_ID" >/dev/null 2>&1 || true
+
+gcloud storage buckets add-iam-policy-binding "gs://${BUCKET_NAME}" \
+  --member="serviceAccount:${SERVICE_ACCOUNT}" \
+  --role="roles/storage.objectAdmin" \
+  --project="$PROJECT_ID" >/dev/null
+
 printf '\n[5/7] Creating/updating SMTP2GO password secret if needed\n'
 USE_SMTP_SECRET=false
 if create_or_update_smtp_secret "$SMTP_PASSWORD_SECRET"; then
@@ -181,7 +198,7 @@ gcloud builds submit \
   .
 
 printf '\n[7/7] Deploying Cloud Run Job and service\n'
-JOB_ENV="SMTP_HOST=${SMTP_HOST},SMTP_PORT=${SMTP_PORT},SMTP_USERNAME=${SMTP_USERNAME},EMAIL_FROM=${EMAIL_FROM},EMAIL_FROM_NAME=${EMAIL_FROM_NAME},EMAIL_REPLY_TO=${EMAIL_REPLY_TO},SMTP_TLS=${SMTP_TLS}"
+JOB_ENV="SMTP_HOST=${SMTP_HOST},SMTP_PORT=${SMTP_PORT},SMTP_USERNAME=${SMTP_USERNAME},EMAIL_FROM=${EMAIL_FROM},EMAIL_FROM_NAME=${EMAIL_FROM_NAME},EMAIL_REPLY_TO=${EMAIL_REPLY_TO},SMTP_TLS=${SMTP_TLS},PROJECT_ID=${PROJECT_ID},OUTPUT_GCS_URI=${OUTPUT_GCS_URI}"
 JOB_SECRET_ARGS=()
 if [[ "$USE_SMTP_SECRET" == "true" ]]; then
   JOB_SECRET_ARGS=(--set-secrets "SMTP_PASSWORD=${SMTP_PASSWORD_SECRET}:latest")
@@ -192,7 +209,7 @@ gcloud run jobs deploy "$JOB_NAME" \
   --region "$REGION" \
   --service-account "$SERVICE_ACCOUNT" \
   --command python \
-  --args indexframe_echo_job.py \
+  --args indexframe_poc.py \
   --tasks 1 \
   --max-retries 0 \
   --set-env-vars "$JOB_ENV" \
@@ -208,10 +225,6 @@ gcloud run deploy "$SERVICE_NAME" \
   --project "$PROJECT_ID"
 
 SERVICE_URL="$(gcloud run services describe "$SERVICE_NAME" --region "$REGION" --format='value(status.url)' --project "$PROJECT_ID")"
-
-# 2. Create GCS Buckets
-echo "Creating Buckets..."
-gcloud storage buckets create "gs://$BUCKET_NAME" --location=$REGION || true
 
 gcloud compute networks subnets update default \
     --region=$REGION \
