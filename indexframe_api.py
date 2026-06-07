@@ -196,7 +196,7 @@ async def home() -> HTMLResponse:
     return HTMLResponse(
         """
         <!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-        <title>Indexframe</title>
+        <title>IndexFrame v0.1</title>
         <style>
           :root { color-scheme: dark; }
           * { box-sizing:border-box; }
@@ -322,7 +322,7 @@ async def home() -> HTMLResponse:
               show('done');
               setStatus('Submission id: ' + data.submission_id);
               urlEl.value = '';
-              setTimeout(() => { show('form'); setStatus(''); }, 2600);
+              setTimeout(() => { show('form'); setStatus(''); }, 4600);
             } catch (err) {
               setStatus(err.message || String(err));
             } finally {
@@ -352,7 +352,7 @@ async def submit(req: SubmitRequest, authorization: Optional[str] = Header(defau
             "ok": True,
             "submission_id": submission_id,
             "email": user.email,
-            "message": "You will receive the link in your email.",
+            "message": "Your task is on the way! You will receive the results via email.",
             "job": job_response,
         }
     )

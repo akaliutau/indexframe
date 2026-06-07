@@ -208,6 +208,16 @@ gcloud run deploy "$SERVICE_NAME" \
   --project "$PROJECT_ID"
 
 SERVICE_URL="$(gcloud run services describe "$SERVICE_NAME" --region "$REGION" --format='value(status.url)' --project "$PROJECT_ID")"
+
+# 2. Create GCS Buckets
+echo "Creating Buckets..."
+gcloud storage buckets create "gs://$BUCKET_NAME" --location=$REGION || true
+
+gcloud compute networks subnets update default \
+    --region=$REGION \
+    --enable-private-ip-google-access
+
+
 cat <<EOF2
 
 Done.
