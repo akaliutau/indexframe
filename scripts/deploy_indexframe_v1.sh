@@ -137,12 +137,10 @@ printf '\n[1/7] Configuring gcloud project %s\n' "$PROJECT_ID"
 gcloud config set project "$PROJECT_ID" >/dev/null
 
 printf '\n[2/7] Enabling required APIs\n'
-gcloud services enable \
-  run.googleapis.com \
-  cloudbuild.googleapis.com \
-  artifactregistry.googleapis.com \
-  iam.googleapis.com \
-  secretmanager.googleapis.com \
+gcloud services enable aiplatform.googleapis.com compute.googleapis.com logging.googleapis.com cloudquotas.googleapis.com \
+       cloudresourcemanager.googleapis.com iam.googleapis.com cloudbuild.googleapis.com \
+       artifactregistry.googleapis.com secretmanager.googleapis.com \
+       run.googleapis.com \
   --project "$PROJECT_ID"
 
 printf '\n[3/7] Ensuring Artifact Registry repo exists\n'

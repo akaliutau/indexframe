@@ -1125,7 +1125,7 @@ def run_pipeline(
         raise RuntimeError("No candidate frames extracted; check downloader/ffmpeg/video input.")
     dump_json(out_dir / "frames.json", [dataclasses.asdict(f) for f in frames])
     contact_sheet = make_contact_sheet(frames, out_dir / "contact_sheet.jpg")
-
+    log(f"skip_gemini? {skip_gemini}")
     if skip_gemini:
         analysis = fallback_analysis(metadata, frames, variants)
     else:
@@ -1204,7 +1204,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--variants", type=int, default=int(os.getenv("INDEXFRAME_VARIANTS", "6")))
     p.add_argument("--size", type=parse_size, default=parse_size(os.getenv("INDEXFRAME_SIZE", "1280x720")))
     p.add_argument("--output-gcs-uri", default=os.getenv("OUTPUT_GCS_URI", ""), help="Optional gs://bucket/prefix upload destination")
-    p.add_argument("--skip-gemini", action="store_false", help="Use deterministic fallback for local smoke tests")
+    p.add_argument("--skip-gemini", action="store_true", help="Use deterministic fallback for local smoke tests")
     return p
 
 

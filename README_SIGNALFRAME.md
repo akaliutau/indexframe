@@ -102,7 +102,7 @@ Example using `yt-dlp` fallback:
 ```bash
 python indexframe_poc.py \
   --url "https://www.youtube.com/watch?v=ihU82ZtsJvk" \
-  --out-dir ./runs/video-1
+  --out-dir ./runs/video-3
 ```
 
 Open:
