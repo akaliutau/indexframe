@@ -51,6 +51,6 @@ if __name__ == "__main__":
     OUTPUT_FILE = "aggregated_dump.txt"
 
     # 3. Define the extensions you want to include
-    ALLOWED_EXTENSIONS = ['.py', '.j2', '.md', '.txt']
+    ALLOWED_EXTENSIONS = ['.py', '.j2', '.md', '.txt', '.sh']
 
     dump_folder_contents(TARGET_FOLDER, OUTPUT_FILE, ALLOWED_EXTENSIONS)

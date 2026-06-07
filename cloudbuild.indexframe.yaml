@@ -1,0 +1,19 @@
+substitutions:
+  _IMAGE: us-central1-docker.pkg.dev/$PROJECT_ID/indexframe/indexframe-poc:manual
+
+steps:
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - -f
+      - Dockerfile.indexframe
+      - -t
+      - ${_IMAGE}
+      - .
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - push
+      - ${_IMAGE}
+
+images:
+  - ${_IMAGE}

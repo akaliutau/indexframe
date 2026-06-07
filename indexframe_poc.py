@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-SignalFrame PoC: YouTube URL -> evidence-ranked keyframes -> cover hero variants.
+Indexframe PoC: YouTube URL -> evidence-ranked keyframes -> cover hero variants.
 
 Design goals:
 - Quick hackathon demo.
@@ -9,7 +9,7 @@ Design goals:
 - Pluggable downloader: use your existing CLI to fetch the video stream locally.
 
 Typical use:
-  python signalframe_poc.py \
+  python indexframe_poc.py \
     --url 'https://www.youtube.com/watch?v=VIDEO_ID' \
     --out-dir ./runs/demo \
     --download-cmd 'your_yt_cli --url {url} --out {out}'
@@ -110,7 +110,7 @@ class RunResult:
 
 
 def log(message: str) -> None:
-    print(f"[signalframe] {message}", flush=True)
+    print(f"[indexframe] {message}", flush=True)
 
 
 def ensure_dir(path: Path) -> Path:
@@ -181,7 +181,7 @@ def parse_youtube_id(url_or_id: str) -> str:
 
 
 def http_get_json(url: str) -> Dict[str, Any]:
-    req = urllib.request.Request(url, headers={"User-Agent": "SignalFramePoC/0.1"})
+    req = urllib.request.Request(url, headers={"User-Agent": "IndexframePoC/0.1"})
     with urllib.request.urlopen(req, timeout=20) as response:  # nosec: demo utility
         return json.loads(response.read().decode("utf-8"))
 
@@ -740,7 +740,7 @@ def analyze_with_gemini(
     )
     prompt = textwrap.dedent(
         f"""
-        You are SignalFrame, an elite video packaging strategist.
+        You are Indexframe, an elite video packaging strategist.
         Goal: choose the best video frames and generate {variants} YouTube cover/thumbnail hero variants.
 
         Constraints:
@@ -827,7 +827,7 @@ def fallback_analysis(metadata: Dict[str, Any], frames: List[FrameCandidate], va
 
 def load_font(size: int) -> ImageFont.ImageFont:
     candidates = [
-        os.getenv("SIGNALFRAME_FONT", ""),
+        os.getenv("INDEXFRAME_FONT", ""),
         "/usr/share/fonts/truetype/dejavu/DejaVuSansCondensed-Bold.ttf",
         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
         "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf",
@@ -942,7 +942,7 @@ def draw_text_block(
 
     # Safe-zone/crop hint for demo credibility.
     mark_font = load_font(18)
-    draw.text((w - 210, h - 34), "SignalFrame PoC", font=mark_font, fill=(255, 255, 255, 180))
+    draw.text((w - 210, h - 34), "Indexframe PoC", font=mark_font, fill=(255, 255, 255, 180))
     return img.convert("RGB")
 
 
@@ -1038,7 +1038,7 @@ def write_index_html(out_dir: Path, metadata: Dict[str, Any], analysis: Dict[str
     doc = f"""
     <!doctype html>
     <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>SignalFrame PoC</title>
+    <title>Indexframe PoC</title>
     <style>
       body {{ margin:0; font-family: Inter, system-ui, -apple-system, Segoe UI, sans-serif; background:#0e1015; color:#f5f7fb; }}
       header {{ max-width:1100px; margin:0 auto; padding:36px 24px 18px; }}
@@ -1054,7 +1054,7 @@ def write_index_html(out_dir: Path, metadata: Dict[str, Any], analysis: Dict[str
       code {{ color:#b6f3c8; }}
     </style></head><body>
       <header>
-        <h1>SignalFrame cover variants</h1>
+        <h1>Indexframe cover variants</h1>
         <p class="summary"><strong>{html.escape(str(metadata.get('title') or 'YouTube video'))}</strong><br>{html.escape(str(analysis.get('video_summary') or ''))}</p>
         <p class="summary">Packaging problem: {html.escape(str(analysis.get('dominant_packaging_problem') or ''))}</p>
         <p class="summary">Artifacts: <code>analysis.json</code>, <code>moments.json</code>, <code>frames/</code>, <code>covers/</code>.</p>
@@ -1190,7 +1190,7 @@ def run_pipeline(
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(description="SignalFrame YouTube cover-variant PoC")
+    p = argparse.ArgumentParser(description="Indexframe YouTube cover-variant PoC")
     p.add_argument("--url", required=True, help="YouTube URL or video id")
     p.add_argument("--out-dir", required=True, type=Path)
     p.add_argument("--project", default=os.getenv("PROJECT_ID", ""))
@@ -1200,9 +1200,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--transcript-file", type=Path, help="Optional .srt/.vtt transcript")
     p.add_argument("--heatmap-json", type=Path, help="Optional heatmap/most-replayed JSON from your downloader or analytics exporter")
     p.add_argument("--download-cmd", default=os.getenv("YT_DOWNLOAD_CMD", ""), help="Command template with {url}, {out}, {out_dir}, {out_base}")
-    p.add_argument("--model", default=os.getenv("SIGNALFRAME_MODEL", "gemini-2.5-flash"))
-    p.add_argument("--variants", type=int, default=int(os.getenv("SIGNALFRAME_VARIANTS", "6")))
-    p.add_argument("--size", type=parse_size, default=parse_size(os.getenv("SIGNALFRAME_SIZE", "1280x720")))
+    p.add_argument("--model", default=os.getenv("INDEXFRAME_MODEL", "gemini-2.5-flash"))
+    p.add_argument("--variants", type=int, default=int(os.getenv("INDEXFRAME_VARIANTS", "6")))
+    p.add_argument("--size", type=parse_size, default=parse_size(os.getenv("INDEXFRAME_SIZE", "1280x720")))
     p.add_argument("--output-gcs-uri", default=os.getenv("OUTPUT_GCS_URI", ""), help="Optional gs://bucket/prefix upload destination")
     p.add_argument("--skip-gemini", action="store_false", help="Use deterministic fallback for local smoke tests")
     return p

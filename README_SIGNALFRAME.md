@@ -1,6 +1,6 @@
-# SignalFrame PoC — YouTube cover variants from video evidence
+# Indexframe PoC — YouTube cover variants from video evidence
 
-SignalFrame is a hackathon-friendly MVP for the adaptive cover-engine idea:
+Indexframe is a hackathon-friendly MVP for the adaptive cover-engine idea:
 
 > User submits a YouTube link. The service analyzes public metadata, comments, transcript/subtitles, optional heatmap/retention evidence, and local video frames. It returns cover/hero image variants plus a rationale for each.
 
@@ -25,9 +25,35 @@ conda activate indexframe
 **Install dependencies**
 
 ```bash
-pip install -r requirements.signalframe.txt
+pip install -r requirements.indexframe.txt
 ```
 
+## Deployment
+
+
+```bash
+npm --version
+jq --version
+gcloud --version
+gcloud auth login
+gcloud auth application-default login
+npm install -g firebase-tools
+firebase --version
+firebase login
+```
+
+Deployment commands
+
+```bash
+cp env.dev-linger.updated .env
+
+# Fill these in .env:
+# EMAIL_FROM=results@your-verified-demo-domain.com
+# EMAIL_REPLY_TO=your-real-email@yourdomain.com
+
+ENV_FILE=../.env scripts/deploy_firebase.sh
+ENV_FILE=../.env scripts/deploy_indexframe_v1.sh
+```
 
 ## Why this is a good quick demo
 
@@ -42,11 +68,11 @@ The important trick: we do **not** ask an image model to write text into an imag
 ## Files
 
 ```text
-signalframe_poc.py              # CLI pipeline
-signalframe_api.py              # tiny synchronous FastAPI wrapper
-requirements.signalframe.txt    # dependencies
-Dockerfile.signalframe          # Cloud Run/API container
-run_signalframe_job.sh          # Cloud Run Job-style entrypoint
+indexframe_poc.py              # CLI pipeline
+indexframe_api.py              # tiny synchronous FastAPI wrapper
+requirements.indexframe.txt    # dependencies
+Dockerfile.indexframe          # Cloud Run/API container
+run_indexframe_job.sh          # Cloud Run Job-style entrypoint
 ```
 
 ## Local CLI run
@@ -65,7 +91,7 @@ export PROJECT_ID="your-gcp-project"
 export VERTEX_LOCATION="global"
 export YOUTUBE_API_KEY="optional-public-data-api-key"
 
-python signalframe_poc.py \
+python indexframe_poc.py \
   --url "https://www.youtube.com/watch?v=VIDEO_ID" \
   --out-dir ./runs/video-1 \
   --download-cmd 'your_yt_cli --url {url} --out {out}'
@@ -74,7 +100,7 @@ python signalframe_poc.py \
 Example using `yt-dlp` fallback:
 
 ```bash
-python signalframe_poc.py \
+python indexframe_poc.py \
   --url "https://www.youtube.com/watch?v=ihU82ZtsJvk" \
   --out-dir ./runs/video-1
 ```
@@ -88,7 +114,7 @@ open ./runs/video-1/index.html
 ## FastAPI demo
 
 ```bash
-uvicorn signalframe_api:app --host 0.0.0.0 --port 8080
+uvicorn indexframe_api:app --host 0.0.0.0 --port 8080
 ```
 
 Then open `http://localhost:8080`, paste a YouTube link, and wait for the synchronous demo response.
@@ -96,9 +122,9 @@ Then open `http://localhost:8080`, paste a YouTube link, and wait for the synchr
 ## Cloud Run API container
 
 ```bash
-gcloud builds submit --tag gcr.io/$PROJECT_ID/signalframe-poc -f Dockerfile.signalframe .
-gcloud run deploy signalframe-poc \
-  --image gcr.io/$PROJECT_ID/signalframe-poc \
+gcloud builds submit --tag gcr.io/$PROJECT_ID/indexframe-poc -f Dockerfile.indexframe .
+gcloud run deploy indexframe-poc \
+  --image gcr.io/$PROJECT_ID/indexframe-poc \
   --region us-central1 \
   --allow-unauthenticated \
   --set-env-vars PROJECT_ID=$PROJECT_ID,VERTEX_LOCATION=global,YOUTUBE_API_KEY=$YOUTUBE_API_KEY
@@ -108,13 +134,13 @@ For a private demo, omit `--allow-unauthenticated`.
 
 ## Cloud Run Job shape
 
-Use `run_signalframe_job.sh` as an entrypoint when you want async batch generation and GCS upload.
+Use `run_indexframe_job.sh` as an entrypoint when you want async batch generation and GCS upload.
 
 Required env vars:
 
 ```bash
 YOUTUBE_URL="https://www.youtube.com/watch?v=VIDEO_ID"
-OUTPUT_GCS_URI="gs://your-bucket/signalframe/demo-run"
+OUTPUT_GCS_URI="gs://your-bucket/indexframe/demo-run"
 PROJECT_ID="your-gcp-project"
 VERTEX_LOCATION="global"
 ```
@@ -123,8 +149,8 @@ Optional:
 
 ```bash
 YT_DOWNLOAD_CMD='your_yt_cli --url {url} --out {out}'
-SIGNALFRAME_VARIANTS=6
-SIGNALFRAME_SIZE=1280x720
+INDEXFRAME_VARIANTS=6
+INDEXFRAME_SIZE=1280x720
 ```
 
 ## Evidence priority

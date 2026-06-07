@@ -219,4 +219,8 @@ __marimo__/
 .idea/
 runs/
 *-key.json
+.firebase-web-config.json
+*.env.bak*
 aggregated_dump.txt
+notes.txt
+scripts/*-debug.log
