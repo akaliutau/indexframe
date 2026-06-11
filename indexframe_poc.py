@@ -35,6 +35,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import base64
 import textwrap
 import time
 import urllib.parse
@@ -165,7 +166,14 @@ def email_from_header() -> str:
     return from_email
 
 
-def send_email(*, to_email: str, subject: str, text: str, html_body: str | None = None) -> None:
+def send_email(
+    *,
+    to_email: str,
+    subject: str,
+    text: str,
+    html_body: str | None = None,
+    inline_images: Optional[Dict[str, Path]] = None,
+) -> None:
     """Send a result email using the same SMTP env vars as indexframe_echo_job.py."""
     host = env_text("SMTP_HOST", "mail.smtp2go.com")
     port = int(env_text("SMTP_PORT", "2525"))
@@ -202,8 +210,23 @@ def send_email(*, to_email: str, subject: str, text: str, html_body: str | None 
     if reply_to:
         message["Reply-To"] = reply_to
     message.set_content(text)
+
     if html_body:
         message.add_alternative(html_body, subtype="html")
+        html_part = message.get_payload()[-1]
+
+        for cid, image_path in (inline_images or {}).items():
+            try:
+                image_bytes = jpeg_thumb_bytes(Path(image_path), max_width=520, quality=74)
+                html_part.add_related(
+                    image_bytes,
+                    maintype="image",
+                    subtype="jpeg",
+                    cid=f"<{cid}>",
+                    filename=f"{cid}.jpg",
+                )
+            except Exception as exc:
+                print(f"[indexframe] inline email image skipped cid={cid} path={image_path}: {short_error(exc)}")
 
     if use_tls:
         with smtplib.SMTP(host, port, timeout=30) as smtp:
@@ -215,6 +238,23 @@ def send_email(*, to_email: str, subject: str, text: str, html_body: str | None 
             smtp.login(username, password)
             smtp.send_message(message)
 
+def jpeg_thumb_bytes(path: Path, *, max_width: int = 720, quality: int = 76) -> bytes:
+    with Image.open(path) as img:
+        img = ImageOps.exif_transpose(img).convert("RGB")
+        if img.width > max_width:
+            new_height = max(1, int(img.height * (max_width / img.width)))
+            img = img.resize((max_width, new_height), Image.Resampling.LANCZOS)
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=quality, optimize=True)
+        return buf.getvalue()
+
+
+def image_data_uri(path: Path) -> str:
+    try:
+        data = jpeg_thumb_bytes(path, max_width=900, quality=78)
+        return "data:image/jpeg;base64," + base64.b64encode(data).decode("ascii")
+    except Exception:
+        return ""
 
 def build_result_email_body(
     *,
@@ -224,7 +264,8 @@ def build_result_email_body(
     summary: Dict[str, Any],
     public_url_items: Optional[List[Dict[str, str]]],
     final_result: Optional[Dict[str, Any]] = None,
-) -> tuple[str, str]:
+) -> tuple[str, str, dict]:
+    inline_images: Dict[str, Path] = {}
     title = str(metadata.get("title") or "YouTube video")
     safe_title = html.escape(title)
     safe_submission_id = html.escape(submission_id)
@@ -263,16 +304,25 @@ def build_result_email_body(
     thumb_cells = []
     for idx, item in enumerate(cover_items, start=1):
         rel = str(item.get("relative_path") or "")
-        link = str(item.get("signed_url") or "")
+        link = str(item.get("signed_url") or index_url or submitted_url)
         variant = variants_by_rel.get(rel, {})
         headline = str(variant.get("headline") or f"Cover {idx}")
         score = variant.get("score_0_to_100")
         meta = f"Score {score}" if score else "Open cover"
+
+        cid = f"cover_{idx}"
+        local_path = Path(str(item.get("local_path") or ""))
+        if local_path.is_file():
+            inline_images[cid] = local_path
+            img_src = f"cid:{cid}"
+        else:
+            img_src = link
+
         thumb_cells.append(
             f"""
             <td style="width:50%;padding:8px;vertical-align:top;">
               <a href="{html.escape(link, quote=True)}" style="text-decoration:none;color:#111827;">
-                <img src="{html.escape(link, quote=True)}" width="248" style="display:block;width:100%;max-width:248px;border-radius:14px;border:1px solid #e5e7eb;aspect-ratio:16/9;object-fit:cover;" alt="{html.escape(headline, quote=True)}">
+                <img src="{html.escape(img_src, quote=True)}" width="248" style="display:block;width:100%;max-width:248px;border-radius:14px;border:1px solid #e5e7eb;aspect-ratio:16/9;object-fit:cover;" alt="{html.escape(headline, quote=True)}">
                 <div style="padding:10px 2px 0;font:700 14px Arial,Helvetica,sans-serif;color:#111827;line-height:1.25;">{html.escape(headline)}</div>
                 <div style="padding:4px 2px 0;font:12px Arial,Helvetica,sans-serif;color:#6b7280;">{html.escape(meta)}</div>
               </a>
@@ -377,7 +427,7 @@ def build_result_email_body(
     </html>
     """.strip()
 
-    return text_body, html_body
+    return text_body, html_body, inline_images
 
 
 
@@ -386,71 +436,6 @@ def signed_url_for_relative_path(public_url_items: Optional[List[Dict[str, str]]
         if item.get("relative_path") == relative_path and item.get("signed_url"):
             return str(item["signed_url"])
     return ""
-
-
-def build_result_email_body2(
-    *,
-    submitted_url: str,
-    submission_id: str,
-    metadata: Dict[str, Any],
-    summary: Dict[str, Any],
-    public_url_items: Optional[List[Dict[str, str]]],
-) -> str:
-    title = str(metadata.get("title") or "YouTube video")
-    lines = [
-        "Indexframe result",
-        "",
-        f"Submission: {submission_id}",
-        f"Video: {title}",
-        f"URL entered: {submitted_url}",
-        "",
-    ]
-
-    index_url = signed_url_for_relative_path(public_url_items, "index.html")
-    analysis_url = signed_url_for_relative_path(public_url_items, "analysis.json")
-    variants_url = signed_url_for_relative_path(public_url_items, "variants.json")
-
-    if index_url:
-        lines.extend(["Result page:", index_url, ""])
-    elif summary.get("index_html"):
-        lines.extend(["Result page:", str(summary["index_html"]), ""])
-
-    if summary.get("gcs_uri"):
-        lines.extend(["GCS folder:", str(summary["gcs_uri"]), ""])
-
-    artifact_links = []
-    if analysis_url:
-        artifact_links.append(("analysis.json", analysis_url))
-    if variants_url:
-        artifact_links.append(("variants.json", variants_url))
-    if artifact_links:
-        lines.append("Artifacts:")
-        for label, link in artifact_links:
-            lines.append(f"- {label}: {link}")
-        lines.append("")
-
-    cover_items = [
-        item
-        for item in public_url_items or []
-        if str(item.get("relative_path") or "").startswith("covers/") and item.get("signed_url")
-    ]
-    if cover_items:
-        lines.append("Cover URLs:")
-        for item in cover_items:
-            lines.append(f"- {item.get('relative_path')}: {item.get('signed_url')}")
-        lines.append("")
-    elif summary.get("public_urls"):
-        lines.append("Public URLs:")
-        for url in summary.get("public_urls") or []:
-            lines.append(f"- {url}")
-        lines.append("")
-
-    if summary.get("signed_url_errors"):
-        lines.append("Some signed URLs could not be generated. See gcs_upload.json for details.")
-        lines.append("")
-
-    lines.append("This email was sent by the full Indexframe pipeline.")
-    return "\n".join(lines).rstrip() + "\n"
 
 
 def slugify(value: str) -> str:
@@ -2783,11 +2768,13 @@ def upload_dir_to_gcs(
 def write_index_html(out_dir: Path, metadata: Dict[str, Any], analysis: Dict[str, Any], rendered: List[Dict[str, Any]]) -> Path:
     cards = []
     for item in rendered:
-        rel = Path(item["cover_path"]).relative_to(out_dir).as_posix()
+        cover_path = Path(item["cover_path"])
+        rel = cover_path.relative_to(out_dir).as_posix()
+        img_src = image_data_uri(cover_path) or rel
         cards.append(
             f"""
             <article class="card">
-              <img src="{html.escape(rel)}" />
+              <img src="{html.escape(img_src, quote=True)}" />
               <h2>{html.escape(str(item.get('headline', '')))}</h2>
               <p class="meta">{html.escape(str(item.get('angle', '')))} · score {html.escape(str(item.get('score_0_to_100', '')))} · {float(item.get('timestamp_sec', 0)):.1f}s</p>
               <p>{html.escape(str(item.get('rationale', '')))}</p>
@@ -3037,7 +3024,7 @@ def run_pipeline(
 
 
     if email_to:
-        text_body, html_body = build_result_email_body(
+        text_body, html_body, inline_images = build_result_email_body(
             submitted_url=url,
             submission_id=submission_id or "manual",
             metadata=metadata,
@@ -3046,7 +3033,13 @@ def run_pipeline(
             final_result=image_hero_pack if "image_hero_pack" in locals() else None,
         )
         try:
-            send_email(to_email=email_to, subject="Your Indexframe result", text=text_body, html_body=html_body)
+            send_email(
+                to_email=email_to,
+                subject="Your Indexframe result",
+                text=text_body,
+                html_body=html_body,
+                inline_images=inline_images,
+            )
         except Exception as exc:
             summary["email_error"] = str(exc)
             dump_json(out_dir / "run_summary.json", summary)
