@@ -10,3 +10,4 @@ pydantic>=2.8.0
 python-dotenv>=1.0
 yt-dlp>=2024.8.6
 playwright>=1.49.0
+pymongo[srv]==4.17.0
