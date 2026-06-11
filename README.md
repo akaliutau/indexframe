@@ -34,7 +34,7 @@ YouTube video
 
 ## The Idea
 
-Most thumbnail tools start from a prompt:
+Most creators use the following strategy to create a nice cover for their video, prompting their favourite AI:
 
 ```text
 "make me a cool thumbnail"
@@ -62,9 +62,7 @@ It is the frame that captures the strongest promise:
 * a number, result, or challenge;
 * the one scene people actually care about.
 
-Indexframe treats the thumbnail as a **packaging problem**.
-
-The video already contains the signal.
+IndexFrame assumes that the video already contains the signal.
 The system’s job is to find it, sharpen it, and turn it into clickable visual options.
 
 ---
@@ -74,7 +72,7 @@ The system’s job is to find it, sharpen it, and turn it into clickable visual 
 A YouTube cover is a tiny billboard.
 It has to compress the entire reason to watch into one image.
 
-Random image generation can look good, but it often loses the truth of the video. Indexframe uses the video itself as the creative source:
+Random image generation can look good, but it often loses the truth of the video. IndexFrame uses the video itself as the creative source:
 
 ```text
 video
@@ -93,8 +91,7 @@ The important trick:
 
 Instead, Gemini helps with strategy, headline, layout, and candidate selection.
 The final typography and layout are rendered by code, so covers stay crisp, readable, and reproducible.
-
-That makes the demo reliable enough for a hackathon stage.
+`gemini-image` is used to create a background images
 
 ---
 
@@ -206,9 +203,7 @@ It runs the full pipeline with `YOUTUBE_URL`, `OUTPUT_GCS_URI`, and cloud enviro
 
 ## Result Packs
 
-Every serious run should become a result pack.
-
-A result pack is the atomic memory unit of Indexframe:
+Every run should become a result pack: the atomic memory unit of IndexFrame:
 
 ```text
 video_id
@@ -239,7 +234,7 @@ Result packs are useful for:
 * building a creator-facing history;
 * later training better thumbnail-selection agents.
 
-A future result pack can look like this:
+Here is an example of how it looks like:
 
 ```json
 {
@@ -274,11 +269,6 @@ A future result pack can look like this:
 }
 ```
 
-The goal is not to create pretty files once.
-The goal is to build reusable creative evidence.
-
----
-
 ## The Cover Optimization Loop
 
 Indexframe is designed to become a feedback loop.
@@ -286,7 +276,7 @@ Indexframe is designed to become a feedback loop.
 Today:
 
 ```text
-generate 6 cover variants
+generate N cover variants
 ```
 
 Tomorrow:
@@ -307,33 +297,6 @@ clarity > curiosity > evidence match > mobile readability > brand fit > CTR
 ```
 
 This turns thumbnail generation from a guessing game into an empirical creative process.
-
----
-
-## Why This Is a Great Hackathon Demo
-
-Indexframe has a simple magic moment:
-
-```text
-Paste a YouTube link.
-Get a gallery of evidence-backed covers.
-```
-
-It is visual, fast to understand, and easy to pitch.
-
-The demo also has real technical depth:
-
-* multimodal reasoning;
-* video frame extraction;
-* LLM strategy generation;
-* deterministic image rendering;
-* Cloud Run async jobs;
-* Firebase Google sign-in;
-* email delivery;
-* optional GCS result hosting;
-* optional MongoDB persistence.
-
-It feels like a product, not just a script.
 
 ---
 
@@ -508,51 +471,6 @@ export EMAIL_FROM_NAME='Indexframe Results'
 export EMAIL_REPLY_TO='you@yourdomain.com'
 export SMTP_TLS='true'
 ```
-
-Do not commit secrets, cookies, `.env` files, or service account keys.
-
----
-
-## Cloud Run Demo Flow
-
-The deployed hackathon flow is intentionally simple:
-
-```text
-Cloud Run service
-  → minimalist web UI
-  → Google sign-in with Firebase Auth
-  → one URL input
-  → POST /api/submit
-  → Cloud Run Job
-  → email with result link
-```
-
-Runtime behavior:
-
-1. User opens the Cloud Run service URL.
-2. User signs in with Google.
-3. User pastes a YouTube URL.
-4. Backend verifies the Firebase token.
-5. Backend starts a Cloud Run Job.
-6. Job processes the submission.
-7. User receives an email with the result.
-
-Manual job execution:
-
-```bash
-gcloud run jobs execute indexframe-echo-job \
-  --project "$PROJECT_ID" \
-  --region "$REGION" \
-  --update-env-vars "SUBMITTED_URL=https://example.com,USER_EMAIL=your-test-recipient@gmail.com,SUBMISSION_ID=manual-test" \
-  --wait
-```
-
-For full processing, run the job with:
-
-```bash
---command bash --args run_indexframe_job.sh
-```
-
 ---
 
 ## Run Artifacts
@@ -620,7 +538,7 @@ Turn successful thumbnail experiments into durable training examples for future 
 
 ## Disclaimer
 
-Use Indexframe only with videos, accounts, cookies, and download methods you are allowed to use.
+Use IndexFrame only with videos, accounts, cookies, and download methods you are allowed to use.
 
 The project does not bypass login, CAPTCHA, paywalls, platform restrictions, access controls, or rate limits.
 
@@ -646,3 +564,22 @@ What is the most clickable truthful promise inside this content?
 ```
 
 Then it turns that promise into covers people actually want to click.
+
+
+---
+
+## ⚖️ License
+
+IndexFrame AI is open-source software distributed under the **MIT License**. 
+
+---
+
+https://devpost.com/software/indexframe
+
+Built exclusively for:
+
+Google Cloud Rapid Agent Hackathon
+
+Building Agents for Real-World Challenges
+
+
