@@ -59,9 +59,9 @@ secret_exists() {
   gcloud secrets describe "$1" --project "$PROJECT_ID" >/dev/null 2>&1
 }
 
-create_or_update_smtp_secret() {
+create_or_update_secret() {
   local secret_name="$1"
-  local secret_value="${SMTP_PASSWORD:-${SMTP2GO_PASSWORD:-}}"
+  local secret_value="$2"
 
   if [[ -n "$secret_value" ]]; then
     local tmp
@@ -148,7 +148,7 @@ gcloud config set project "$PROJECT_ID" >/dev/null
 
 printf '\n[2/7] Enabling required APIs\n'
  gcloud services enable aiplatform.googleapis.com compute.googleapis.com logging.googleapis.com cloudquotas.googleapis.com \
-        cloudresourcemanager.googleapis.com iam.googleapis.com cloudbuild.googleapis.com \
+        cloudresourcemanager.googleapis.com iam.googleapis.com cloudbuild.googleapis.com cloudbilling.googleapis.com \
         artifactregistry.googleapis.com secretmanager.googleapis.com \
         run.googleapis.com iamcredentials.googleapis.com storage.googleapis.com \
    --project "$PROJECT_ID"
@@ -173,6 +173,11 @@ gcloud projects add-iam-policy-binding "$PROJECT_ID" \
   --role="roles/run.developer" \
   --condition=None >/dev/null
 
+gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+  --member="serviceAccount:${SERVICE_ACCOUNT}" \
+  --role="roles/aiplatform.user" \
+  --condition=None >/dev/null
+
 gcloud iam service-accounts add-iam-policy-binding "$SERVICE_ACCOUNT" \
   --member="serviceAccount:${SERVICE_ACCOUNT}" \
   --role="roles/iam.serviceAccountTokenCreator" \
@@ -189,9 +194,18 @@ gcloud storage buckets add-iam-policy-binding "gs://${BUCKET_NAME}" \
 
 printf '\n[5/7] Creating/updating SMTP2GO password secret and checking YouTube cookies secret\n'
 USE_SMTP_SECRET=false
-if create_or_update_smtp_secret "$SMTP_PASSWORD_SECRET"; then
+if create_or_update_secret "$SMTP_PASSWORD_SECRET" "${SMTP_PASSWORD:-${SMTP2GO_PASSWORD:-}}"; then
   USE_SMTP_SECRET=true
   gcloud secrets add-iam-policy-binding "$SMTP_PASSWORD_SECRET" \
+    --project "$PROJECT_ID" \
+    --member="serviceAccount:${SERVICE_ACCOUNT}" \
+    --role="roles/secretmanager.secretAccessor" >/dev/null
+fi
+
+USE_MONGODB_SECRET=false
+if create_or_update_secret "$MONGODB_SECRET" "${MONGODB_URI}"; then
+  USE_MONGODB_SECRET=true
+  gcloud secrets add-iam-policy-binding "$MONGODB_SECRET" \
     --project "$PROJECT_ID" \
     --member="serviceAccount:${SERVICE_ACCOUNT}" \
     --role="roles/secretmanager.secretAccessor" >/dev/null
@@ -223,10 +237,13 @@ gcloud builds submit \
   .
 
 printf '\n[7/7] Deploying Cloud Run Job and service\n'
-JOB_ENV="SMTP_HOST=${SMTP_HOST},SMTP_PORT=${SMTP_PORT},SMTP_USERNAME=${SMTP_USERNAME},EMAIL_FROM=${EMAIL_FROM},EMAIL_FROM_NAME=${EMAIL_FROM_NAME},EMAIL_REPLY_TO=${EMAIL_REPLY_TO},SMTP_TLS=${SMTP_TLS},PROJECT_ID=${PROJECT_ID},OUTPUT_GCS_URI=${OUTPUT_GCS_URI},GOOGLE_SERVICE_ACCOUNT_EMAIL=${SERVICE_ACCOUNT}"
+JOB_ENV="SMTP_HOST=${SMTP_HOST},SMTP_PORT=${SMTP_PORT},SMTP_USERNAME=${SMTP_USERNAME},EMAIL_FROM=${EMAIL_FROM},EMAIL_FROM_NAME=${EMAIL_FROM_NAME},EMAIL_REPLY_TO=${EMAIL_REPLY_TO},SMTP_TLS=${SMTP_TLS},PROJECT_ID=${PROJECT_ID},OUTPUT_GCS_URI=${OUTPUT_GCS_URI},GOOGLE_SERVICE_ACCOUNT_EMAIL=${SERVICE_ACCOUNT},INDEXFRAME_MONGODB_DB=${INDEXFRAME_MONGODB_DB},INDEXFRAME_MONGODB_COLLECTION=${INDEXFRAME_MONGODB_COLLECTION}"
 JOB_SECRET_VALUES=()
 if [[ "$USE_SMTP_SECRET" == "true" ]]; then
   JOB_SECRET_VALUES+=("SMTP_PASSWORD=${SMTP_PASSWORD_SECRET}:latest")
+fi
+if [[ "$USE_MONGODB_SECRET" == "true" ]]; then
+  JOB_SECRET_VALUES+=("MONGODB_URI=${MONGODB_SECRET}:latest")
 fi
 if [[ "$USE_YOUTUBE_COOKIES_SECRET" == "true" ]]; then
   JOB_ENV="${JOB_ENV},YT_DLP_COOKIES_FILE=${YOUTUBE_COOKIES_MOUNT_PATH}"
@@ -237,6 +254,7 @@ JOB_SECRET_ARGS=()
 if [[ "${#JOB_SECRET_VALUES[@]}" -gt 0 ]]; then
   JOB_SECRET_CSV="$(IFS=,; printf '%s' "${JOB_SECRET_VALUES[*]}")"
   JOB_SECRET_ARGS=(--set-secrets "$JOB_SECRET_CSV")
+  echo JOB_SECRET_CSV
 fi
 
 gcloud run jobs deploy "$JOB_NAME" \
@@ -247,6 +265,8 @@ gcloud run jobs deploy "$JOB_NAME" \
   --args indexframe_poc.py \
   --tasks 1 \
   --max-retries 0 \
+  --memory "2Gi" \
+  --cpu "2" \
   --set-env-vars "$JOB_ENV" \
   "${JOB_SECRET_ARGS[@]}" \
   --project "$PROJECT_ID"

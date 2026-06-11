@@ -72,6 +72,8 @@ try:
 except Exception:  # pragma: no cover
     imageio_ffmpeg = None  # type: ignore[assignment]
 
+from indexframe_result_pack_store import build_image_hero_pack, maybe_store_image_hero_pack
+
 VIDEO_EXTS = {".mp4", ".mov", ".m4v", ".webm", ".mkv"}
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp"}
 DEFAULT_SIZE = (1280, 720)
@@ -163,8 +165,8 @@ def email_from_header() -> str:
     return from_email
 
 
-def send_email(*, to_email: str, subject: str, text: str) -> None:
-    """Send a plain-text result email using the same SMTP env vars as indexframe_echo_job.py."""
+def send_email(*, to_email: str, subject: str, text: str, html_body: str | None = None) -> None:
+    """Send a result email using the same SMTP env vars as indexframe_echo_job.py."""
     host = env_text("SMTP_HOST", "mail.smtp2go.com")
     port = int(env_text("SMTP_PORT", "2525"))
     username = env_text("SMTP_USERNAME", "indexframe")
@@ -186,6 +188,7 @@ def send_email(*, to_email: str, subject: str, text: str) -> None:
                     "username": username,
                     "subject": subject,
                     "text": text,
+                    "html": html_body,
                 },
                 indent=2,
             )
@@ -199,6 +202,8 @@ def send_email(*, to_email: str, subject: str, text: str) -> None:
     if reply_to:
         message["Reply-To"] = reply_to
     message.set_content(text)
+    if html_body:
+        message.add_alternative(html_body, subtype="html")
 
     if use_tls:
         with smtplib.SMTP(host, port, timeout=30) as smtp:
@@ -211,6 +216,171 @@ def send_email(*, to_email: str, subject: str, text: str) -> None:
             smtp.send_message(message)
 
 
+def build_result_email_body(
+    *,
+    submitted_url: str,
+    submission_id: str,
+    metadata: Dict[str, Any],
+    summary: Dict[str, Any],
+    public_url_items: Optional[List[Dict[str, str]]],
+    final_result: Optional[Dict[str, Any]] = None,
+) -> tuple[str, str]:
+    title = str(metadata.get("title") or "YouTube video")
+    safe_title = html.escape(title)
+    safe_submission_id = html.escape(submission_id)
+    safe_submitted_url = html.escape(submitted_url)
+
+    index_url = signed_url_for_relative_path(public_url_items, "index.html") or str(summary.get("index_html") or "")
+    analysis_url = signed_url_for_relative_path(public_url_items, "analysis.json")
+    variants_url = signed_url_for_relative_path(public_url_items, "variants.json")
+
+    final_result = final_result or {}
+    best_variant = final_result.get("best_variant") or {}
+    analysis = final_result.get("analysis") or {}
+    rationale = str(
+        best_variant.get("rationale")
+        or analysis.get("dominant_packaging_problem")
+        or analysis.get("video_summary")
+        or ""
+    ).strip()
+    if len(rationale) > 520:
+        rationale = rationale[:517].rstrip() + "..."
+
+    variants_by_rel: Dict[str, Dict[str, Any]] = {}
+    for variant in final_result.get("variants") or []:
+        if not isinstance(variant, dict):
+            continue
+        cover_name = Path(str(variant.get("cover_path") or "")).name
+        if cover_name:
+            variants_by_rel[f"covers/{cover_name}"] = variant
+
+    cover_items = [
+        item
+        for item in public_url_items or []
+        if str(item.get("relative_path") or "").startswith("covers/") and item.get("signed_url")
+    ][:6]
+
+    thumb_cells = []
+    for idx, item in enumerate(cover_items, start=1):
+        rel = str(item.get("relative_path") or "")
+        link = str(item.get("signed_url") or "")
+        variant = variants_by_rel.get(rel, {})
+        headline = str(variant.get("headline") or f"Cover {idx}")
+        score = variant.get("score_0_to_100")
+        meta = f"Score {score}" if score else "Open cover"
+        thumb_cells.append(
+            f"""
+            <td style="width:50%;padding:8px;vertical-align:top;">
+              <a href="{html.escape(link, quote=True)}" style="text-decoration:none;color:#111827;">
+                <img src="{html.escape(link, quote=True)}" width="248" style="display:block;width:100%;max-width:248px;border-radius:14px;border:1px solid #e5e7eb;aspect-ratio:16/9;object-fit:cover;" alt="{html.escape(headline, quote=True)}">
+                <div style="padding:10px 2px 0;font:700 14px Arial,Helvetica,sans-serif;color:#111827;line-height:1.25;">{html.escape(headline)}</div>
+                <div style="padding:4px 2px 0;font:12px Arial,Helvetica,sans-serif;color:#6b7280;">{html.escape(meta)}</div>
+              </a>
+            </td>
+            """
+        )
+
+    thumb_rows = ""
+    for i in range(0, len(thumb_cells), 2):
+        row_cells = "".join(thumb_cells[i : i + 2])
+        if i + 1 >= len(thumb_cells):
+            row_cells += '<td style="width:50%;padding:8px;"></td>'
+        thumb_rows += f"<tr>{row_cells}</tr>"
+
+    artifact_links = []
+    if analysis_url:
+        artifact_links.append(f'<a href="{html.escape(analysis_url, quote=True)}" style="color:#6d28d9;text-decoration:none;">analysis.json</a>')
+    if variants_url:
+        artifact_links.append(f'<a href="{html.escape(variants_url, quote=True)}" style="color:#6d28d9;text-decoration:none;">variants.json</a>')
+
+    text_lines = [
+        "Indexframe result",
+        "",
+        f"Submission: {submission_id}",
+        f"Video: {title}",
+        f"Original link: {submitted_url}",
+    ]
+    if index_url:
+        text_lines.extend(["", f"Result page: {index_url}"])
+    if rationale:
+        text_lines.extend(["", "Model rationale:", rationale])
+    if cover_items:
+        text_lines.extend(["", "Cover links:"])
+        for idx, item in enumerate(cover_items, start=1):
+            rel = str(item.get("relative_path") or f"Cover {idx}")
+            text_lines.append(f"- {rel}: {item.get('signed_url')}")
+    if summary.get("gcs_uri"):
+        text_lines.extend(["", f"GCS folder: {summary['gcs_uri']}"])
+    text_lines.append("\nThis email was sent by the full Indexframe pipeline.")
+    text_body = "\n".join(text_lines).rstrip() + "\n"
+
+    html_body = f"""
+    <!doctype html>
+    <html>
+      <body style="margin:0;padding:0;background:#f4f0ea;">
+        <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background:#f4f0ea;padding:28px 12px;">
+          <tr>
+            <td align="center">
+              <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:640px;background:#ffffff;border-radius:24px;overflow:hidden;border:1px solid #eadfd2;box-shadow:0 18px 50px rgba(31,22,12,.12);">
+                <tr>
+                  <td style="padding:34px 34px 24px;background:linear-gradient(135deg,#111827,#3b0764);">
+                    <div style="font:700 13px Arial,Helvetica,sans-serif;letter-spacing:.14em;text-transform:uppercase;color:#c4b5fd;">Indexframe result</div>
+                    <h1 style="margin:12px 0 0;font:800 28px Arial,Helvetica,sans-serif;line-height:1.15;color:#ffffff;">Your thumbnail pack is ready</h1>
+                    <p style="margin:12px 0 0;font:15px Arial,Helvetica,sans-serif;line-height:1.55;color:#ddd6fe;">{safe_title}</p>
+                  </td>
+                </tr>
+                <tr>
+                  <td style="padding:26px 34px 8px;">
+                    {"<a href=\"" + html.escape(index_url, quote=True) + "\" style=\"display:inline-block;background:#111827;color:#ffffff;text-decoration:none;border-radius:999px;padding:13px 20px;font:700 14px Arial,Helvetica,sans-serif;\">Open result page</a>" if index_url else ""}
+                    <p style="margin:18px 0 0;font:13px Arial,Helvetica,sans-serif;line-height:1.6;color:#6b7280;">
+                      <strong style="color:#374151;">Submission:</strong> {safe_submission_id}<br>
+                      <strong style="color:#374151;">Original link:</strong> <a href="{html.escape(submitted_url, quote=True)}" style="color:#6d28d9;text-decoration:none;">{safe_submitted_url}</a>
+                      {("<br><strong style=\"color:#374151;\">GCS folder:</strong> " + html.escape(str(summary.get("gcs_uri")))) if summary.get("gcs_uri") else ""}
+                    </p>
+                  </td>
+                </tr>
+                {f'''
+                <tr>
+                  <td style="padding:16px 34px 4px;">
+                    <div style="padding:16px 18px;background:#faf7f2;border:1px solid #efe4d7;border-radius:18px;">
+                      <div style="font:800 13px Arial,Helvetica,sans-serif;letter-spacing:.08em;text-transform:uppercase;color:#92400e;">Model rationale</div>
+                      <p style="margin:8px 0 0;font:15px Arial,Helvetica,sans-serif;line-height:1.6;color:#374151;">{html.escape(rationale)}</p>
+                    </div>
+                  </td>
+                </tr>
+                ''' if rationale else ""}
+                {f'''
+                <tr>
+                  <td style="padding:20px 26px 8px;">
+                    <div style="padding:0 8px 8px;font:800 16px Arial,Helvetica,sans-serif;color:#111827;">Clickable cover thumbnails</div>
+                    <table role="presentation" width="100%" cellspacing="0" cellpadding="0">{thumb_rows}</table>
+                  </td>
+                </tr>
+                ''' if thumb_rows else ""}
+                {f'''
+                <tr>
+                  <td style="padding:12px 34px 26px;">
+                    <div style="font:13px Arial,Helvetica,sans-serif;color:#6b7280;">Artifacts: {" &nbsp;·&nbsp; ".join(artifact_links)}</div>
+                  </td>
+                </tr>
+                ''' if artifact_links else ""}
+                <tr>
+                  <td style="padding:20px 34px;background:#fbfaf8;border-top:1px solid #eee7dc;font:12px Arial,Helvetica,sans-serif;color:#9ca3af;">
+                    Sent by the full Indexframe pipeline.
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+        </table>
+      </body>
+    </html>
+    """.strip()
+
+    return text_body, html_body
+
+
+
 def signed_url_for_relative_path(public_url_items: Optional[List[Dict[str, str]]], relative_path: str) -> str:
     for item in public_url_items or []:
         if item.get("relative_path") == relative_path and item.get("signed_url"):
@@ -218,7 +388,7 @@ def signed_url_for_relative_path(public_url_items: Optional[List[Dict[str, str]]
     return ""
 
 
-def build_result_email_body(
+def build_result_email_body2(
     *,
     submitted_url: str,
     submission_id: str,
@@ -694,6 +864,19 @@ def json_from_model(
     if media_parts:
         contents.extend(media_parts)
 
+    input_components = [
+        {
+            "name": "prompt",
+            "type": "text",
+            "chars": len(prompt),
+            "bytes": len(prompt.encode("utf-8")),
+        }
+    ]
+    input_components.extend(
+        {"name": f"media_part_{idx}", "type": "image_or_media"}
+        for idx, _part in enumerate(media_parts or [], start=1)
+    )
+
     started = time.time()
     record: Dict[str, Any] = {
         "time_epoch": started,
@@ -703,8 +886,16 @@ def json_from_model(
         "prompt_chars": len(prompt),
         "prompt_bytes": len(prompt.encode("utf-8")),
         "media_parts_count": len(media_parts or []),
+        "input_components": input_components,
+        "schema_top_level_keys": sorted((schema.get("properties") or {}).keys()),
         **(extra_debug or {}),
     }
+    log(
+        "LLM start "
+        f"op={op_name} model={model} temp={temperature} "
+        f"prompt_chars={record['prompt_chars']} prompt_bytes={record['prompt_bytes']} "
+        f"media_parts={record['media_parts_count']} debug_jsonl={debug_jsonl or '<none>'}"
+    )
     try:
         response = client.models.generate_content(
             model=model,
@@ -719,6 +910,12 @@ def json_from_model(
         record["status"] = "ok"
         if debug_jsonl:
             append_jsonl(debug_jsonl, record)
+        log(
+            "LLM done "
+            f"op={op_name} status=ok latency={record.get('latency_sec')}s "
+            f"response_chars={record.get('response_text_chars')} "
+            f"candidates={record.get('candidate_count')} parts={record.get('part_count')}"
+        )
         return json.loads(response.text)
     except Exception as exc:
         record.update({
@@ -730,6 +927,11 @@ def json_from_model(
         })
         if debug_jsonl:
             append_jsonl(debug_jsonl, record)
+        log(
+            "LLM done "
+            f"op={op_name} status=error latency={record['latency_sec']}s "
+            f"error={record['error_type']}: {record['error']}"
+        )
         raise
 
 
@@ -1263,6 +1465,7 @@ def analyze_with_gemini(
     frames: List[FrameCandidate],
     contact_sheet: Path,
     variants: int,
+    debug_jsonl: Optional[Path] = None,
 ) -> Dict[str, Any]:
     frame_table = "\n".join(
         f"- {f.frame_id}: {f.ts:.1f}s, source={f.source}, reason={f.reason}, local_visual_score={f.visual_score:.0f}, path={Path(f.path).name}"
@@ -1270,17 +1473,36 @@ def analyze_with_gemini(
     )
     prompt = textwrap.dedent(
         f"""
-        You are Indexframe, an elite video packaging strategist.
-        Goal: choose the best video frames and generate {variants} YouTube cover/thumbnail hero variants.
+        You are Indexframe, an elite YouTube thumbnail director and title editor.
 
-        Constraints:
-        - Final image text must be short: headline <= 5 words, subheadline <= 7 words.
-        - Do not invent unsupported claims. Prefer concrete numbers, mistakes, strong visual moments, audience questions.
-        - Avoid generic titles like "watch this" or "amazing story".
-        - Use comments as audience evidence, not as truth.
-        - Choose frame_id from the contact sheet only.
-        - Prefer variants that are visually distinct and emotionally distinct.
+        Goal: use ALL available evidence from the URL ingestion — metadata, description, comments, transcript,
+        and the stop-frame contact sheet — to choose source moments and design {variants} expressive cover candidates.
+
+        What must change from boring/background variants:
+        - Think in thumbnail concepts, not decorative backgrounds. Every candidate needs a clear visual idea.
+        - The stop-frames are evidence and raw material, not a locked background. Prefer frames with faces, conflict,
+          transformation, stakes, objects, errors, reveals, scale, or a visually obvious question.
+        - Generate a catchy visible title for each cover. It should be the main overlay text rendered by code.
+        - Use no extra visible copy unless it materially improves the click promise; keep subheadline empty when in doubt.
+        - Avoid generic phrases like "watch this", "you won't believe", "amazing story", or vague hype.
+        - Prefer concrete hooks from the video: numbers, before/after, mistake, contradiction, result, audience pain,
+          challenge, cliffhanger, or emotionally specific reaction.
+
+        Output rules:
+        - Return only JSON matching the schema. No markdown, no commentary.
+        - Choose frame_id only from the contact sheet.
+        - headline is the catchy cover title: 2 to 5 words, punchy, readable at mobile size.
+        - subheadline is optional: 0 to 4 words. Empty string is allowed and often preferred.
+        - Make all {variants} variants conceptually and visually distinct.
         - layout must be one of: left_text, right_text, bottom_bar, big_number, split_claim.
+        - Use comments as audience evidence, not as truth. Do not invent unsupported claims.
+
+        Available context summary:
+        metadata_title_chars={len(str(metadata.get('title', '') or ''))}
+        description_chars={len(str(metadata.get('description', '') or ''))}
+        transcript_chars={len(transcript_text or '')}
+        comment_chars={len(comment_text or '')}
+        stop_frames={len(frames)}
 
         YouTube metadata:
         title: {metadata.get('title', '')}
@@ -1288,7 +1510,7 @@ def analyze_with_gemini(
         description: {str(metadata.get('description', ''))[:MAX_DESCRIPTION_CHARS]}
         stats: {json.dumps(metadata.get('statistics') or {}, ensure_ascii=False)}
 
-        Candidate frames:
+        Candidate stop-frames:
         {frame_table}
 
         Transcript snippets, timestamped:
@@ -1304,7 +1526,20 @@ def analyze_with_gemini(
         prompt=prompt,
         schema=ANALYSIS_SCHEMA,
         media_parts=[media_part(contact_sheet)],
-        temperature=0.35,
+        temperature=0.45,
+        debug_jsonl=debug_jsonl,
+        op_name="packaging_analysis",
+        extra_debug={
+            "content_components": {
+                "metadata_title_chars": len(str(metadata.get("title", "") or "")),
+                "description_chars": len(str(metadata.get("description", "") or "")),
+                "transcript_chars": len(transcript_text or ""),
+                "comment_chars": len(comment_text or ""),
+                "stop_frame_count": len(frames),
+                "contact_sheet": image_file_debug(contact_sheet),
+            },
+            "requested_variants": variants,
+        },
     )
 
 
@@ -1333,7 +1568,7 @@ def fallback_analysis(metadata: Dict[str, Any], frames: List[FrameCandidate], va
                 "frame_id": f.frame_id,
                 "angle": angles[i % len(angles)],
                 "headline": headline,
-                "subheadline": "Generated from video evidence",
+                "subheadline": "",
                 "layout": layouts[i % len(layouts)],
                 "score_0_to_100": int(min(95, 62 + f.visual_score / 3)),
                 "rationale": "Fallback creative variant generated from title and visual frame score.",
@@ -1454,11 +1689,11 @@ def draw_text_block(
     tagfont = load_font(24)
 
     # Tag pill.
-    tag = f"{angle}  ·  {score}"
-    tb = draw.textbbox((0, 0), tag, font=tagfont)
-    pill = (text_x, max(24, text_y - 58), text_x + tb[2] - tb[0] + 28, max(24, text_y - 58) + 38)
-    draw.rounded_rectangle(pill, radius=18, fill=(255, 255, 255, 232))
-    draw.text((pill[0] + 14, pill[1] + 6), tag, font=tagfont, fill=(10, 10, 12))
+    #tag = f"{angle}  ·  {score}"
+    #tb = draw.textbbox((0, 0), tag, font=tagfont)
+    #pill = (text_x, max(24, text_y - 58), text_x + tb[2] - tb[0] + 28, max(24, text_y - 58) + 38)
+    #draw.rounded_rectangle(pill, radius=18, fill=(255, 255, 255, 232))
+    #draw.text((pill[0] + 14, pill[1] + 6), tag, font=tagfont, fill=(10, 10, 12))
 
     y = text_y
     for line in wrap_text(draw, headline, font, box_w, 3):
@@ -1868,7 +2103,7 @@ def fallback_ai_cover_plan(analysis: Dict[str, Any], frames: List[FrameCandidate
     for idx in range(variants):
         base = dict(base_variants[idx % len(base_variants)])
         headline = safe_cover_label(base.get("headline"), "Watch This", 44)
-        subheadline = safe_cover_label(base.get("subheadline"), "Generated from video evidence", 54)
+        subheadline = safe_cover_label(base.get("subheadline"), "", 54)
         frame_id = str(base.get("frame_id") or frames[idx % len(frames)].frame_id)
         planned.append(
             {
@@ -1880,19 +2115,19 @@ def fallback_ai_cover_plan(analysis: Dict[str, Any], frames: List[FrameCandidate
                 "text_labels": [headline, subheadline],
                 "layout": str(base.get("layout") or "left_text"),
                 "visual_prompt": (
-                    "Create a cinematic, high-contrast YouTube hero image inspired by the referenced video frame. "
-                    "Preserve the real subject and moment, but make the lighting, depth, composition, and emotional clarity stronger. "
-                    "No text, no logos, no watermark, no UI."
+                    "Create a bold finished YouTube thumbnail concept from the referenced stop-frame and video context. "
+                    "Use the frame as evidence, then re-compose it with expressive lighting, subject separation, tension, and a strong focal point. "
+                    "Avoid a plain decorative background. No text, no logos, no watermark, no UI."
                 ),
-                "composition_notes": "Use the referenced frame as grounding material; leave clean negative space for text labels.",
+                "composition_notes": "Use the referenced frame as grounding material; make a dramatic visual idea with clean title space.",
                 "score_0_to_100": int(base.get("score_0_to_100") or 70),
                 "rationale": str(base.get("rationale") or "Fallback AI-cover plan derived from the existing cover variant."),
                 "risk": str(base.get("risk") or "AI base image may drift from the source frame."),
             }
         )
     return {
-        "creative_direction": "Generate more cinematic cover backgrounds, then render crisp text labels deterministically.",
-        "material_notes": ["Fallback plan reused existing Gemini cover variants."],
+        "creative_direction": "Generate expressive thumbnail concepts from stop-frames and URL context, then render the catchy title deterministically.",
+        "material_notes": ["Fallback plan reused existing cover variants and removed non-essential extra text."],
         "ai_cover_variants": planned,
     }
 
@@ -1964,33 +2199,56 @@ def plan_ai_cover_variants(
     )
     prompt = textwrap.dedent(
         f"""
-        You are Indexframe's AI cover creative director.
+        You are Indexframe's senior thumbnail concept artist and title editor.
 
-        Stage 1 task: design {variants} AI-generated YouTube cover backgrounds and the text labels that will be rendered later by code.
-        Do not generate images in this step. Return only JSON.
+        Stage 1 task: design {variants} expressive AI-generated YouTube cover candidates.
+        Do not generate images in this step. Return only JSON matching the schema.
 
-        Use collected material:
-        - real video frames in the contact sheet
-        - the existing packaging analysis and cover variants
-        - transcript/comment hooks as supporting evidence
+        Use all collected context:
+        - public URL metadata: title, channel, description, stats when present
+        - transcript hooks and timestamped moments
+        - public comments as audience-language evidence
+        - every stop-frame in the contact sheet
+        - the existing packaging analysis, but improve it when it is generic
         - the optional user creative prompt
 
-        Important rendering rule:
-        - The image model must NOT create visible words. All text labels will be rendered later with Pillow.
-        - Each visual_prompt must explicitly say: no text, no letters, no logos, no watermark, no UI.
-        - Keep every cover grounded in a source_frame_id from the frame list; do not invent impossible objects.
-        - Prefer cinematic, editorial, high-contrast, emotionally clear images with clean negative space for labels.
-        - text_labels should be 1 to 3 short overlays, not sentences.
+        New creative direction:
+        - Create thumbnail IDEAS, not stable title cards and not generic cinematic backgrounds.
+        - Each candidate must be visually different: close-up emotion, reveal, contradiction, before/after,
+          object-as-proof, scale, danger/tension, result, failure, or absurd juxtaposition.
+        - Use source_frame_id as grounding evidence, but the image prompt may re-compose the scene into a
+          poster-like thumbnail while keeping the real subject/context believable.
+        - The generated image must contain no text. The code will render the title on top.
+
+        Visible text rule:
+        - headline is the only required visible title. Make it catchy, 2 to 5 words, high-CTR but truthful.
+        - subheadline should usually be an empty string. Use it only for a tiny qualifier of 1 to 4 words.
+        - text_labels should contain only the title and optional tiny qualifier; no sentences.
+        - Do not output extra prose outside JSON.
+
+        Image prompt rule:
+        - Every visual_prompt must explicitly include: no text, no letters, no numbers, no logos, no watermark, no UI.
+        - Avoid prompts that merely say "cinematic background". Describe subject, tension, lighting, camera,
+          composition, negative space for title, and what makes the cover emotionally clickable.
+        - Keep claims grounded. Comments can reveal audience confusion/desire, not factual proof.
 
         Optional user creative prompt:
         {custom_prompt or 'No extra prompt provided.'}
+
+        Available context sizes:
+        title_chars={len(str(metadata.get('title', '') or ''))}
+        description_chars={len(str(metadata.get('description', '') or ''))}
+        transcript_chars={len(transcript_text or '')}
+        comment_chars={len(comment_text or '')}
+        stop_frames={len(frames)}
 
         YouTube metadata:
         title: {metadata.get('title', '')}
         channel: {metadata.get('channel_title', '')}
         description: {str(metadata.get('description', ''))[:MAX_DESCRIPTION_CHARS]}
+        stats: {json.dumps(metadata.get('statistics') or {}, ensure_ascii=False)}
 
-        Candidate frames:
+        Candidate stop-frames:
         {frame_table}
 
         Existing packaging analysis:
@@ -2003,10 +2261,10 @@ def plan_ai_cover_variants(
         }, indent=2, ensure_ascii=False)}
 
         Transcript evidence:
-        {compact_evidence_text(transcript_text)}
+        {compact_evidence_text(transcript_text, 2200)}
 
         Comment evidence:
-        {compact_evidence_text(comment_text)}
+        {compact_evidence_text(comment_text, 1800)}
         """
     ).strip()
     try:
@@ -2016,10 +2274,20 @@ def plan_ai_cover_variants(
             prompt=prompt,
             schema=AI_COVER_PLAN_SCHEMA,
             media_parts=[media_part(contact_sheet)],
-            temperature=0.45,
+            temperature=0.72,
             debug_jsonl=debug_jsonl,
             op_name="ai_cover_plan",
-            extra_debug={"contact_sheet": image_file_debug(contact_sheet), "requested_variants": variants},
+            extra_debug={
+                "content_components": {
+                    "metadata_title_chars": len(str(metadata.get("title", "") or "")),
+                    "description_chars": len(str(metadata.get("description", "") or "")),
+                    "transcript_chars": len(transcript_text or ""),
+                    "comment_chars": len(comment_text or ""),
+                    "stop_frame_count": len(frames),
+                    "contact_sheet": image_file_debug(contact_sheet),
+                },
+                "requested_variants": variants,
+            },
         )
     except Exception as exc:
         log(f"AI cover planning failed; using fallback plan. error={short_error(exc, 1000)}")
@@ -2034,22 +2302,25 @@ def ai_cover_generation_prompt(item: Dict[str, Any], metadata: Dict[str, Any], s
     labels = ", ".join(item.get("text_labels") or [])
     return textwrap.dedent(
         f"""
-        Generate a new cinematic YouTube cover background using the referenced video frame only as visual evidence.
-        Do not copy, upscale, or lightly retouch the reference frame. Re-compose and re-render it so the result is visibly different while staying grounded in the same scene.
+        Generate a finished expressive YouTube thumbnail base image from the referenced stop-frame and video context.
+
+        Treat the reference frame as grounding evidence, not as a background to copy. Re-compose it into a more
+        clickable editorial/poster-like scene while preserving the believable subject, setting, and core moment.
 
         Video title context: {metadata.get('title', '')}
-        Cover angle: {item.get('angle', '')}
-        Text labels to reserve space for, but DO NOT render: {labels}
+        Cover concept angle: {item.get('angle', '')}
+        Title that code will render later, DO NOT render it in the image: {labels}
         Composition notes: {item.get('composition_notes', '')}
-        Visual prompt: {item.get('visual_prompt', '')}
+        Visual concept: {item.get('visual_prompt', '')}
 
         Output requirements:
         - aspect ratio {aspect_ratio_for_size(size)}
-        - visually richer than a raw frame: editorial lighting, depth, clean subject separation, strong focal point
-        - visibly different from the reference frame: changed lighting, depth, atmosphere, camera feel, and composition
-        - preserve the real subject/context from the reference; do not hallucinate unrelated people or products
-        - leave clean negative space for text labels
-        - absolutely no visible text, letters, numbers, logos, watermark, subtitles, UI, or fake typography
+        - make the image feel like a complete thumbnail concept, not a plain background
+        - strong focal point, expressive emotion/tension, punchy lighting, depth, and subject separation
+        - clear negative space where the title can be overlaid by code
+        - noticeably different from the raw frame: changed crop, lighting, atmosphere, depth, and visual hierarchy
+        - grounded in the real video context; do not add unrelated people, products, brands, or impossible claims
+        - absolutely no visible text, letters, numbers, captions, subtitles, logos, watermark, UI, or fake typography
         """
     ).strip()
 
@@ -2096,8 +2367,21 @@ def generate_ai_cover_base_image(
                 "temperature": AI_COVER_TEMPERATURE,
                 "prompt_chars": len(prompt),
                 "prompt_bytes": len(prompt.encode("utf-8")),
+                "input_components": [
+                    {"name": "prompt", "type": "text", "chars": len(prompt), "bytes": len(prompt.encode("utf-8"))},
+                    *[
+                        {"name": f"reference_image_{idx}", "type": "image", **image_file_debug(path)}
+                        for idx, path in enumerate(used_paths, start=1)
+                    ],
+                ],
                 "reference_images": [image_file_debug(path) for path in used_paths],
             }
+            log(
+                "LLM image start "
+                f"variant={variant_id or '<unknown>'} model={model} attempt={attempt} "
+                f"prompt_chars={request_record['prompt_chars']} refs={ref_count} "
+                f"aspect_ratio={aspect_ratio} debug_jsonl={debug_jsonl or '<none>'}"
+            )
             try:
                 if AI_COVER_REQUEST_INTERVAL_SEC > 0:
                     time.sleep(AI_COVER_REQUEST_INTERVAL_SEC)
@@ -2139,6 +2423,13 @@ def generate_ai_cover_base_image(
                 attempts.append(request_record)
                 if debug_jsonl:
                     append_jsonl(debug_jsonl, request_record)
+                log(
+                    "LLM image done "
+                    f"variant={variant_id or '<unknown>'} status=generated "
+                    f"latency={request_record.get('latency_sec')}s "
+                    f"inline_images={request_record.get('inline_image_count')} "
+                    f"bytes={request_record.get('inline_image_bytes')}"
+                )
                 return image, {
                     "status": "generated",
                     "attempts": attempts,
@@ -2207,6 +2498,10 @@ def render_ai_cover_variants(
         debug_jsonl=debug_jsonl,
     )
     dump_json(out_dir / "ai_cover_plan.json", plan)
+    log(
+        f"AI cover plan ready variants={len(plan.get('ai_cover_variants') or [])} "
+        f"planner_model={planner_model} image_model={image_model} debug_jsonl={debug_jsonl}"
+    )
 
     rendered: List[Dict[str, Any]] = []
     generation_results: List[Dict[str, Any]] = []
@@ -2216,6 +2511,11 @@ def render_ai_cover_variants(
         frame = frame_by_id.get(str(item.get("source_frame_id"))) or frames[(idx - 1) % len(frames)]
         variant_id = str(item.get("variant_id") or f"ai_{idx:02d}")
         prompt = ai_cover_generation_prompt(item, metadata, size)
+        log(
+            f"AI cover candidate {idx}/{variants} variant={variant_id} "
+            f"frame={frame.frame_id} headline={str(item.get('headline') or '')!r} "
+            f"prompt_chars={len(prompt)}"
+        )
         slug = slugify(str(item.get("angle") or item.get("variant_id") or "cover"))
         base_path = ai_dir / f"ai_base_{idx:02d}_{slug}.png"
         raw_path = ai_dir / f"ai_raw_{idx:02d}_{slug}.png"
@@ -2554,7 +2854,7 @@ def run_pipeline(
 ) -> RunResult:
     started = time.time()
     if ai_covers is None:
-        ai_covers = env_flag("INDEXFRAME_AI_COVERS")
+        ai_covers = env_flag("INDEXFRAME_AI_COVERS", True)
     image_model = image_model or os.getenv("INDEXFRAME_IMAGE_MODEL", "gemini-2.5-flash-image")
     ai_cover_prompt = ai_cover_prompt or os.getenv("INDEXFRAME_AI_COVER_PROMPT", "")
     email_to = (email_to or env_text("USER_EMAIL") or env_text("RESULT_EMAIL_TO") or env_text("EMAIL_TO")).strip()
@@ -2596,7 +2896,9 @@ def run_pipeline(
         raise RuntimeError("No candidate frames extracted; check downloader/ffmpeg/video input.")
     dump_json(out_dir / "frames.json", [dataclasses.asdict(f) for f in frames])
     contact_sheet = make_contact_sheet(frames, out_dir / "contact_sheet.jpg")
+    llm_debug_jsonl = out_dir / "llm_calls.jsonl"
     client: Any = None
+    log(f"contact_sheet={contact_sheet} frames={len(frames)} llm_debug_jsonl={llm_debug_jsonl}")
     log(f"skip_gemini? {skip_gemini}; ai_covers? {ai_covers}")
     if skip_gemini:
         analysis = fallback_analysis(metadata, frames, variants)
@@ -2612,6 +2914,7 @@ def run_pipeline(
                 frames=frames,
                 contact_sheet=contact_sheet,
                 variants=variants,
+                debug_jsonl=llm_debug_jsonl,
             )
         except Exception as exc:
             log(f"Gemini analysis failed; using fallback. error={exc}")
@@ -2700,17 +3003,50 @@ def run_pipeline(
         "email_sent": False,
         "elapsed_sec": round(time.time() - started, 2),
     }
+    image_hero_pack = None
+    try:
+        image_hero_pack = build_image_hero_pack(
+            url=url,
+            video_id=video_id,
+            metadata=metadata,
+            analysis=analysis,
+            variants=rendered,
+            frames=frames,
+            moments=moments,
+            summary=summary,
+            out_dir=out_dir,
+            model=model if not skip_gemini else "fallback",
+            image_model=image_model,
+            size=size,
+            ai_covers=bool(ai_covers),
+            skip_gemini=bool(skip_gemini),
+            submission_id=submission_id or None,
+        )
+        image_hero_pack_path = out_dir / "image_hero_pack.json"
+        dump_json(image_hero_pack_path, image_hero_pack)
+        summary["image_hero_pack"] = {
+            "pack_id": image_hero_pack.get("pack_id"),
+            "path": str(image_hero_pack_path),
+        }
+        summary["storage"] = maybe_store_image_hero_pack(image_hero_pack)
+        log(f"mongo storage status: {summary['storage']}")
+    except Exception as exc:
+        err = short_error(exc, 1000)
+        summary["storage"] = {"enabled": False, "error": f"{exc.__class__.__name__}: {err}"}
+        log(f"mongo storage failed: {err}")
+
 
     if email_to:
-        body = build_result_email_body(
+        text_body, html_body = build_result_email_body(
             submitted_url=url,
             submission_id=submission_id or "manual",
             metadata=metadata,
             summary=summary,
             public_url_items=public_url_items,
+            final_result=image_hero_pack if "image_hero_pack" in locals() else None,
         )
         try:
-            send_email(to_email=email_to, subject="Your Indexframe result", text=body)
+            send_email(to_email=email_to, subject="Your Indexframe result", text=text_body, html_body=html_body)
         except Exception as exc:
             summary["email_error"] = str(exc)
             dump_json(out_dir / "run_summary.json", summary)
@@ -2743,16 +3079,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--transcript-file", type=Path, help="Optional .srt/.vtt transcript")
     p.add_argument("--heatmap-json", type=Path, help="Optional heatmap/most-replayed JSON from your downloader or analytics exporter")
     p.add_argument("--download-cmd", default=os.getenv("YT_DOWNLOAD_CMD", ""), help="Command template with {url}, {out}, {out_dir}, {out_base}")
-    p.add_argument("--model", default=os.getenv("INDEXFRAME_MODEL", "gemini-2.5-flash"))
-    p.add_argument("--variants", type=int, default=int(os.getenv("INDEXFRAME_VARIANTS", "6")))
+    p.add_argument("--model", default=os.getenv("INDEXFRAME_MODEL", "gemini-3.5-flash"))
+    p.add_argument("--variants", type=int, default=int(os.getenv("INDEXFRAME_VARIANTS", "2")))
     p.add_argument("--size", type=parse_size, default=parse_size(os.getenv("INDEXFRAME_SIZE", "1280x720")))
     p.add_argument("--output-gcs-uri", default=os.getenv("OUTPUT_GCS_URI", ""), help="Optional gs://bucket/prefix upload destination")
     p.add_argument("--skip-gemini", action="store_true", help="Use deterministic fallback for local smoke tests")
     p.add_argument(
         "--ai-covers",
         action=argparse.BooleanOptionalAction,
-        default=env_flag("INDEXFRAME_AI_COVERS"),
-        help="Turn on/off optional two-stage AI cover generation before deterministic text rendering.",
+        default=env_flag("INDEXFRAME_AI_COVERS", True),
+        help="Turn on/off expressive AI cover generation before deterministic text rendering. Defaults on; use --no-ai-covers to force source-frame rendering.",
     )
     p.add_argument("--image-model", default=os.getenv("INDEXFRAME_IMAGE_MODEL", "gemini-2.5-flash-image"), help="Image generation model used when --ai-covers is enabled")
     p.add_argument("--ai-cover-prompt", default=os.getenv("INDEXFRAME_AI_COVER_PROMPT", ""), help="Optional creative guidance for the AI cover planner")
@@ -2794,6 +3130,8 @@ if __name__ == "__main__":
         main()
     except KeyboardInterrupt:
         raise SystemExit(130)
+
+
 
 
 

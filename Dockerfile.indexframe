@@ -15,7 +15,7 @@ RUN apt-get update \
 COPY requirements.indexframe.txt ./
 RUN pip install --no-cache-dir -r requirements.indexframe.txt
 
-COPY indexframe_poc.py indexframe_api.py indexframe_echo_job.py refresh_youtube_cookies.py ./
+COPY indexframe_poc.py indexframe_api.py indexframe_result_pack_store.py indexframe_echo_job.py refresh_youtube_cookies.py ./
 
 EXPOSE 8080
 CMD exec uvicorn indexframe_api:app --host 0.0.0.0 --port ${PORT}
