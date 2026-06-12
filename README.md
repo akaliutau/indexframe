@@ -1,15 +1,15 @@
 # 🎬 IndexFrame: Evidence-Driven YouTube Cover Factory
 
 <p align="left">
-  <img alt="Status" src="https://img.shields.io/badge/status-hackathon--prototype-orange">
+  <img alt="Status" src="https://img.shields.io/badge/status-prototype-orange">
   <img alt="AI" src="https://img.shields.io/badge/AI-Gemini--powered-blue">
   <img alt="Output" src="https://img.shields.io/badge/output-cover--variants-green">
 </p>
 
+![Result Pack](docs/assets/header.png)
+
 **IndexFrame** is an AI system that turns a single YouTube link into a set of 
 high-signal cover / hero image variants — grounded in the actual video.
-
-
 
 HOW it works:
 
@@ -69,7 +69,7 @@ The system’s job is to find it, sharpen it, and turn it into clickable visual 
 
 ## Why Video Evidence Matters
 
-A YouTube cover is a tiny billboard.
+A YouTube cover is essentially a tiny billboard.
 It has to compress the entire reason to watch into one image.
 
 Random image generation can look good, but it often loses the truth of the video. IndexFrame uses the video itself as the creative source:
@@ -85,13 +85,14 @@ video
   → deterministic final render
 ```
 
-The important trick:
-
 > Indexframe does not rely on an image model to write perfect text into the image.
 
 Instead, Gemini helps with strategy, headline, layout, and candidate selection.
 The final typography and layout are rendered by code, so covers stay crisp, readable, and reproducible.
 `gemini-image` is used to create a background images
+
+![IndexFrame multimodal context builder](docs/assets/multi-context.jpg)
+[Open full-size diagram](docs/assets/multi-context.jpg)
 
 ---
 
@@ -117,15 +118,12 @@ The current prototype already implements the foundation:
 16. Optionally runs behind a Cloud Run + Firebase Auth demo shell.
 17. Optionally emails the result link after async job execution.
 
-This is enough to demo the full product loop:
-
-```text
-one URL in → evidence-backed cover pack out
-```
-
 ---
 
 ## Architecture
+
+![IndexFrame pipeline architecture](docs/assets/indexframe-arch.png)
+[Open full-size diagram](docs/assets/indexframe-arch.png)
 
 ```text
 YouTube URL
