@@ -161,37 +161,37 @@ Firebase sign-in + Cloud Run Job + email delivery
 
 ## Core Components
 
-### [`indexframe_poc.py`](./indexframe_poc.py)
+[`indexframe_poc.py`](./indexframe_poc.py)
 
 The main pipeline.
 
 It takes a YouTube URL, gathers evidence, extracts frames, asks Gemini for creative direction, renders cover variants, writes artifacts, and optionally uploads results.
 
-### [`indexframe_api.py`](./indexframe_api.py)
+[`indexframe_api.py`](./indexframe_api.py)
 
 The FastAPI demo wrapper.
 
 It provides a minimalist web UI, Firebase Google sign-in, URL submission, `/api/submit`, and `/api/analyze` for local development.
 
-### [`indexframe_echo_job.py`](./indexframe_echo_job.py)
+[`indexframe_echo_job.py`](./indexframe_echo_job.py)
 
 The first async worker.
 
 For v1, it proves the Cloud Run Job + email flow with a mock result. The real worker can reuse the same shape and call `indexframe_poc.py`.
 
-### [`indexframe_result_pack_store.py`](./indexframe_result_pack_store.py)
+[`indexframe_result_pack_store.py`](./indexframe_result_pack_store.py)
 
 The persistence layer.
 
 It builds MongoDB-friendly Image Hero result packs containing metadata, analysis, variants, frames, artifacts, hashes, and the best candidate.
 
-### [`refresh_youtube_cookies.py`](./refresh_youtube_cookies.py)
+[`refresh_youtube_cookies.py`](./refresh_youtube_cookies.py)
 
 A demo helper for authenticated YouTube downloads.
 
 It uses a dedicated Playwright browser profile, exports a Netscape cookies file, and can upload it to Secret Manager for Cloud Run usage.
 
-### [`run_indexframe_job.sh`](./run_indexframe_job.sh)
+[`run_indexframe_job.sh`](./run_indexframe_job.sh)
 
 The Cloud Run Job-style entrypoint for real async processing.
 
@@ -397,21 +397,12 @@ Open:
 http://localhost:8080
 ```
 
-The local app supports:
+The local app and async product shell support the following endpoints:
 
-```text
-POST /api/analyze
-```
-
-for synchronous pipeline testing.
-
-The async product shell supports:
-
-```text
-POST /api/submit
-```
-
-for URL submission, authenticated user extraction, Cloud Run Job execution, and email delivery.
+| Endpoint            | Description                                                                                 |
+|:--------------------|:--------------------------------------------------------------------------------------------|
+| `POST /api/analyze` | Synchronous pipeline testing.                                                               |
+| `POST /api/submit`  | URL submission, authenticated user extraction, Cloud Run Job execution, and email delivery. |
 
 
 ## Environment
