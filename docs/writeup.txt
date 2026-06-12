@@ -1,0 +1,47 @@
+## Inspiration
+You can spend days making a great video, but people still decide whether to watch it in a few seconds.
+
+For YouTube creators, the cover image is often the whole pitch. If it does not stop the scroll, the video never gets a chance. We built IndexFrame because choosing that cover still feels like guessing: scrub through the video, take screenshots, try a few layouts, hope one works.
+
+We wanted to make that process smarter.
+
+## What it does
+IndexFrame turns a YouTube link into a set of AI-generated cover variants.
+
+You paste a video URL, and the system looks at the actual video evidence: metadata, comments, transcript signals when available, and visual frames. Then it generates several thumbnail directions and a result page (for this demo, we just email the results to user).
+
+The goal is to find the strongest “why should I click?” moment inside the video.
+
+## How we built it
+We built a small web app where a user signs in (currently supports sing-up with Google), pastes a YouTube URL, and submits it. The backend starts a Cloud Run Job to process the video.
+
+The pipeline extracts frames, gathers available context, uses Gemini to reason about thumbnail ideas, and renders cover variants. When the job finishes, the user gets an email with the result link.
+
+We also store each run in MongoDB as a structured result pack. That gives us a starting point for a future knowledge base: which videos were processed, what variants were generated, and what signals were used.
+
+## Challenges
+Video processing is slow and messy. Some videos have transcripts, some do not. Some frames are useful, some are not. We also had to connect authentication, Cloud Run jobs, email delivery, generated result pages, and MongoDB records. We have implemented a sophisticated video-stream extraction pipeline on the basis of yt-dlp
+
+Another challenge was keeping the AI output reliable. Instead of asking an image model to do everything, we used AI for reasoning and strategy, then rendered the final covers with code so the output stays readable and consistent. The images are still AI-generated, but now they are generated with strong grounding and safeguards.
+
+## What we learned
+We learned that AI tools feel much more useful when they are grounded in real content. A good thumbnail is not just a nice image — it is a promise about the video.
+
+We also learned that storing the results matters. Every run can become training data for better future suggestions.
+
+## What’s next
+Next, we want to connect real YouTube analytics, compare generated covers against performance, and use that feedback to make better recommendations over time.
+
+The long-term vision is a thumbnail engine that learns what works for each creator.
+
+## Built With
+docker
+fastapi
+firebase
+gcp
+gemini
+mongodb
+pillow
+python
+youtube
+
