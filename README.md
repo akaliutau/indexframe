@@ -85,11 +85,11 @@ video
   → deterministic final render
 ```
 
-> Indexframe does not rely on an image model to write perfect text into the image.
+> Indexframe does not rely on an image model to generate a cover image from scratch.
 
 Instead, Gemini helps with strategy, headline, layout, and candidate selection.
 The final typography and layout are rendered by code, so covers stay crisp, readable, and reproducible.
-`gemini-image` is used to create a background images
+`gemini-image` is used to create a background images using maximum collected data about video, its popularity and content. 
 
 ![IndexFrame multimodal context builder](docs/assets/multi-context.jpg)
 [Open full-size diagram](docs/assets/multi-context.jpg)
