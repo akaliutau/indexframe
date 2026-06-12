@@ -161,37 +161,37 @@ Firebase sign-in + Cloud Run Job + email delivery
 
 ## Core Components
 
-### `indexframe_poc.py`
+### [`indexframe_poc.py`](./indexframe_poc.py)
 
 The main pipeline.
 
 It takes a YouTube URL, gathers evidence, extracts frames, asks Gemini for creative direction, renders cover variants, writes artifacts, and optionally uploads results.
 
-### `indexframe_api.py`
+### [`indexframe_api.py`](./indexframe_api.py)
 
 The FastAPI demo wrapper.
 
 It provides a minimalist web UI, Firebase Google sign-in, URL submission, `/api/submit`, and `/api/analyze` for local development.
 
-### `indexframe_echo_job.py`
+### [`indexframe_echo_job.py`](./indexframe_echo_job.py)
 
 The first async worker.
 
 For v1, it proves the Cloud Run Job + email flow with a mock result. The real worker can reuse the same shape and call `indexframe_poc.py`.
 
-### `indexframe_result_pack_store.py`
+### [`indexframe_result_pack_store.py`](./indexframe_result_pack_store.py)
 
 The persistence layer.
 
 It builds MongoDB-friendly Image Hero result packs containing metadata, analysis, variants, frames, artifacts, hashes, and the best candidate.
 
-### `refresh_youtube_cookies.py`
+### [`refresh_youtube_cookies.py`](./refresh_youtube_cookies.py)
 
 A demo helper for authenticated YouTube downloads.
 
 It uses a dedicated Playwright browser profile, exports a Netscape cookies file, and can upload it to Secret Manager for Cloud Run usage.
 
-### `run_indexframe_job.sh`
+### [`run_indexframe_job.sh`](./run_indexframe_job.sh)
 
 The Cloud Run Job-style entrypoint for real async processing.
 
@@ -343,9 +343,8 @@ python indexframe_poc.py \
   --skip-gemini
 ```
 
----
 
-## Using a Custom Downloader
+## Using a Custom Downloader (yt-dlp)
 
 Indexframe can use a pluggable downloader command.
 
@@ -383,7 +382,6 @@ docker run --rm \
     --skip-gemini
 ```
 
----
 
 ## FastAPI Demo
 
@@ -415,7 +413,6 @@ POST /api/submit
 
 for URL submission, authenticated user extraction, Cloud Run Job execution, and email delivery.
 
----
 
 ## Environment
 
@@ -469,7 +466,6 @@ export EMAIL_FROM_NAME='Indexframe Results'
 export EMAIL_REPLY_TO='you@yourdomain.com'
 export SMTP_TLS='true'
 ```
----
 
 ## Run Artifacts
 
@@ -500,39 +496,24 @@ These artifacts make each run auditable:
 * which cover looked strongest;
 * where the final files were stored.
 
----
 
 ## Roadmap
 
-### 1. Better creative scoring
+- [ ] **Better creative scoring**
+  Rank covers by mobile readability, emotional clarity, novelty, and evidence match.
+- [ ] **YouTube OAuth + Analytics**
+  Connect creator accounts and use real CTR / retention feedback.
+- [ ] **Automatic thumbnail refresh**
+  Detect underperforming videos and suggest new covers.
+- [ ] **Multi-agent creative search**
+  Generate competing strategies: curiosity, authority, conflict, transformation, mistake, result.
+- [ ] **Brand memory**
+  Learn creator-specific style rules, colors, recurring visual language, and audience expectations.
+- [ ] **A/B testing workflow**
+  Create testable cover packs and track which visual promise wins.
+- [ ] **Dataset builder**
+  Turn successful thumbnail experiments into durable training examples for future creative agents.
 
-Rank covers by mobile readability, emotional clarity, novelty, and evidence match.
-
-### 2. YouTube OAuth + Analytics
-
-Connect creator accounts and use real CTR / retention feedback.
-
-### 3. Automatic thumbnail refresh
-
-Detect underperforming videos and suggest new covers.
-
-### 4. Multi-agent creative search
-
-Generate competing strategies: curiosity, authority, conflict, transformation, mistake, result.
-
-### 5. Brand memory
-
-Learn creator-specific style rules, colors, recurring visual language, and audience expectations.
-
-### 6. A/B testing workflow
-
-Create testable cover packs and track which visual promise wins.
-
-### 7. Dataset builder
-
-Turn successful thumbnail experiments into durable training examples for future creative agents.
-
----
 
 ## Disclaimer
 
@@ -562,9 +543,6 @@ What is the most clickable truthful promise inside this content?
 ```
 
 Then it turns that promise into covers people actually want to click.
-
-
----
 
 ## ⚖️ License
 
